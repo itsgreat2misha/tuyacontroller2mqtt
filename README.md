@@ -21,26 +21,32 @@ Port: `/dev/ttyAS2`, 115200 baud raw. Frames are 7 bytes, `fc` ... `fe`.
 |---|---|
 | `fc 00 1c 00 00 00 fe` | Presence on |
 | `fc 00 0c 00 00 00 fe` | Presence off (after 30-60 s idle) |
-| `fc 00 00 00 01 08 fe` | Button 1 (momentary) |
-| `fc 00 00 00 01 07 fe` | Button 2 |
-| `fc 00 00 00 01 06 fe` | Button 3 |
-| `fc 00 00 00 01 05 fe` | Button 4 |
-| `fc 00 00 00 01 04 fe` | Button 5 |
-| `fc 00 00 a3 <01/00> 03 fe` | Button 6, toggle L3 |
-| `fc 00 00 a2 <01/00> 02 fe` | Button 7, toggle L2 |
-| `fc 00 00 a1 <01/00> 01 fe` | Button 8, toggle L1 |
+| `fc 00 00 00 01 04 fe` | Button 4 (momentary) |
+| `fc 00 00 00 01 05 fe` | Button 5 |
+| `fc 00 00 00 01 06 fe` | Button 6 |
+| `fc 00 00 00 01 07 fe` | Button 7 |
+| `fc 00 00 00 01 08 fe` | Button 8 |
+| `fc 00 00 a1 <01/00> 01 fe` | Relay 1, toggle (old L1) |
+| `fc 00 00 a2 <01/00> 02 fe` | Relay 2, toggle (old L2) |
+| `fc 00 00 a3 <01/00> 03 fe` | Relay 3, toggle (old L3) |
 
+The entity number IS the frame's id/code byte: relays 1-3, then momentary
+buttons 4-8 in reverse of their old top-to-bottom order (old buttons 5-1).
 Hold = one frame (indistinguishable from a tap). Double-tap = two frames;
 detect it by timing in HA if needed. Toggle vs momentary is fixed by the MCU
 frame type, not a configurable mode.
 
 ## Home Assistant entities (MQTT discovery)
 
-- `event.f5_button_1` .. `event.f5_button_5` — press events
-- `binary_sensor.f5_l3`, `f5_l2`, `f5_l1` — toggle state, retained
+- `event.f5_button_4` .. `event.f5_button_8` — press events
+- `binary_sensor.f5_relay_1`, `f5_relay_2`, `f5_relay_3` — toggle state, retained
 - `binary_sensor.f5_presence` — motion, retained
 
-Toggle buttons are binary sensors, not switches: no outbound MCU command
+On first start with the v2 numbering, the daemon publishes empty retained
+discovery for the old `f5_button_1`..`5` and `f5_l1`..`l3` topics, so the
+old entities are removed from HA instead of lingering as unavailable.
+
+Relay buttons are binary sensors, not switches: no outbound MCU command
 to change their state was found, so an HA switch would have nowhere to go.
 
 ## App behaviour
@@ -52,9 +58,19 @@ to change their state was found, so an HA switch would have nowhere to go.
   needed to open it; the service sets 115200 baud on every start because
   the port defaults to 9600.
 - MQTT settings (host, port, user, password) are entered in the app's
-  settings screen on the panel and stored in SharedPreferences. They are
-  never in this repo. On Save, the service connects immediately and
-  publishes discovery, so entities appear without a button press first.
+  settings screen on the panel. They are never in this repo. The password
+  is stored AES/GCM-encrypted with a key in the Android Keystore
+  (`PasswordStore.java`); only ciphertext is in SharedPreferences, and a
+  legacy plaintext entry is migrated and deleted on first run. Honest
+  limit: this panel is rooted with unauthenticated adb, so root could
+  still use the Keystore key via system APIs; this stops plaintext
+  exposure, it is not a defence against root.
+- Device name defaults to the Android device name (`Settings.Global`
+  device_name, e.g. "Entryway assistant") and can be edited in settings
+  before enabling; it becomes the HA device name in discovery.
+- On Save, the service connects immediately and publishes discovery, so
+  entities appear without a button press first, and a 30-second reconnect
+  loop covers broker restarts.
 - MQTT is a dependency-free raw MQTT 3.1.1 client (`MqttPublisher.java`).
   Paho was deliberately removed: its ResourceBundle log properties are
   not in a dex, so `MqttClient` construction crashed on Android with
