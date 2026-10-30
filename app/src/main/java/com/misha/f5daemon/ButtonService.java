@@ -82,6 +82,21 @@ public class ButtonService extends Service {
     }
     public static boolean wakelockEnabled(SharedPreferences p) { return p.getBoolean("wakelock_enabled", true); }
     public static boolean wakescreenEnabled(SharedPreferences p) { return p.getBoolean("wakescreen_enabled", true); }
+    private void enforceDesiredRotation() {
+        try {
+            SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+            int desiredDeg = p.getInt("rotation_desired_deg", 90);
+            if (desiredDeg != 0 && desiredDeg != 90 && desiredDeg != 180 && desiredDeg != 270) desiredDeg = 90;
+            if (!Settings.System.canWrite(this)) { Log.w(TAG, "startup rotation check skipped: WRITE_SETTINGS not granted"); return; }
+            int cur = Settings.System.getInt(getContentResolver(), Settings.System.USER_ROTATION, -1);
+            int accel = Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, -1);
+            if (cur == desiredDeg / 90 && accel == 0) { Log.i(TAG, "startup rotation already correct: " + desiredDeg); lastRotation = desiredDeg; return; }
+            Settings.System.putInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0);
+            Settings.System.putInt(getContentResolver(), Settings.System.USER_ROTATION, desiredDeg / 90);
+            lastRotation = desiredDeg;
+            Log.i(TAG, "startup rotation enforced: was user_rotation=" + cur + " accel=" + accel + " -> " + desiredDeg);
+        } catch (Exception e) { Log.w(TAG, "startup rotation check failed: " + e); }
+    }
     private void applyWakelock() {
         SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
         if (wakelockEnabled(p)) {
@@ -108,6 +123,15 @@ public class ButtonService extends Service {
             .setSmallIcon(android.R.drawable.ic_dialog_info).build();
         startForeground(1, n);
         applyWakelock();
+        // Startup rotation check (Oct 30, 2026): user_rotation does NOT
+        // survive a reboot on this panel, and the Kiosk Autostart plugin
+        // rotation commands are manual config that was once lost. The
+        // daemon itself enforces the desired rotation on every service
+        // start instead, reusing the same WRITE_SETTINGS path as the
+        // MQTT /rotation/set command. Runs once per start only — never
+        // in pollLoop — so a deliberate rotation change is not fought.
+        // If WRITE_SETTINGS is not granted, this logs and does nothing.
+        enforceDesiredRotation();
         mqtt.setCommandListener((topic, payload) -> {
             try { handleCommand(topic, payload); }
             catch (Exception e) { Log.w(TAG, "mqtt command failed: " + e, e); }
@@ -463,6 +487,9 @@ public class ButtonService extends Service {
                 if (!Settings.System.canWrite(this)) { Log.w(TAG, "rotation set refused: WRITE_SETTINGS not granted"); publishDeviceStates(true); return; }
                 Settings.System.putInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0);
                 Settings.System.putInt(getContentResolver(), Settings.System.USER_ROTATION, deg / 90);
+                // Persist the desired rotation so the startup check
+                // enforces THIS value after a reboot, not a hardcoded 90.
+                p.edit().putInt("rotation_desired_deg", deg).apply();
                 lastRotation = deg; mqtt.rotation(deg);
             } catch (Exception e) { Log.w(TAG, "rotation set failed: " + e); }
         } else if (topic.endsWith("/reboot/press")) {

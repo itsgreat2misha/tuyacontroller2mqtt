@@ -202,9 +202,17 @@ follows the system rotation: on a vertically mounted panel, set
 `settings put system user_rotation 1` (or 3, for the other direction)
 — the panel has no accelerometer, so sensor auto-rotate cannot work.
 Note: `user_rotation` does NOT persist across reboots on this panel
-(observed Oct 30, 2026: it reverted to 0 after reboot), so rotation is
-re-applied at every Kiosk start by the Autostart plugin commands below,
-not left to the setting alone.
+(observed Oct 30, 2026: it reverted to 0 after reboot). Since Oct 30,
+2026 the daemon enforces the desired rotation itself on every service
+start (see `enforceDesiredRotation` in `ButtonService`): it reads the
+persisted desired rotation (default 90, updated whenever a
+`/rotation/set` MQTT command succeeds) and, if WRITE_SETTINGS is
+granted, sets `accelerometer_rotation` to 0 and `user_rotation` to the
+desired value. This runs once per start only, never in the poll loop,
+so a deliberate rotation change is not fought. The Autostart plugin
+rotation commands below are therefore optional legacy config, not
+required — but the plugin's daemon-start command is still required,
+because the daemon only enforces rotation once it is actually started.
 
 ## Autostart on this panel (working, verified Oct 30, 2026)
 
