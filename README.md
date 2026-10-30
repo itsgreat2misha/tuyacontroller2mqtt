@@ -38,13 +38,15 @@ inbound):
 
 | Frame | Meaning |
 |---|---|
-| `fc 00 00 a1 01 00 fe` / `fc 00 00 a1 00 00 fe` | Relay 1 on / off |
-| `fc 00 00 a2 01 00 fe` / `fc 00 00 a2 00 00 fe` | Relay 2 on / off |
-| `fc 00 00 a3 01 00 fe` / `fc 00 00 a3 00 00 fe` | Relay 3 on / off |
+| `fc 00 00 a1 01 01 fe` / `fc 00 00 a1 00 01 fe` | Relay 1 on / off (real switch frame, last byte = relay id) |
+| `fc 00 00 a2 01 02 fe` / `fc 00 00 a2 00 02 fe` | Relay 2 on / off |
+| `fc 00 00 a3 01 03 fe` / `fc 00 00 a3 00 03 fe` | Relay 3 on / off |
 | `fc 00 00 aa ff 00 fe` | Query relay states -> batch `a1/a2/a3/a4` |
 | `fc 00 1d 01 00 00 fe` | Night light on |
 | `fc 00 1d 00 00 00 fe` | Night light off |
 | `fc 00 1d 02 <00-64 hex> 00 fe` | Night light brightness 0-100 |
+
+McuTest frames (`...00FE`) are TEST frames: they change the MCU's reported/query state but NOT the button LED or the actual relay -- that was the v5/v6 bug. The real set frame is vendor A485McuUtil.send() for an unbound local switch, identical to an inbound press frame (last byte = relay id).
 
 A virtual relay set produces NO immediate frame; the new state is only
 visible via a subsequent query batch. A physical press produces an

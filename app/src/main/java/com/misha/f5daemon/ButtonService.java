@@ -14,9 +14,15 @@ import java.io.*;
 // Momentary: fc 00 00 00 01 <id 04..08> fe -> Buttons 4..8 (id IS the number)
 // Toggle: fc 00 00 a3/a2/a1 <state 01/00> <code 03/02/01> fe -> Relays 3/2/1
 //   (code IS the relay number)
-// Outbound (vendor McuTestActivity, proven live Oct 30, 2026):
-//   Relay N set: fc 00 00 a<N> <01 on / 00 off> 00 fe -- NO immediate frame;
-//   state is only visible via a subsequent query batch.
+// Outbound relay set -- v7 correction (Oct 30, 2026):
+//   McuTestActivity frames fc 00 00 a<N> <01/00> 00 fe are TEST frames:
+//   they change the MCU's reported/query state, but NOT the button LED
+//   or the actual relay. The real set frame is the one vendor
+//   A485McuUtil.send() sends for an unbound local switch, and it is
+//   identical to an inbound physical-press frame:
+//   fc 00 00 a<N> <01 on / 00 off> <N> fe  (last byte = relay id, not 00).
+//   e.g. Relay 3 ON = fc 00 00 a3 01 03 fe, OFF = fc 00 00 a3 00 03 fe.
+//   No immediate frame is expected back; state is confirmed via query.
 //   Query: fc 00 00 aa ff 00 fe -> batch a1/a2/a3/a4 state frames.
 //   Night light: fc 00 1d 01 00 00 fe on, fc 00 1d 00 00 00 fe off,
 //   fc 00 1d 02 <brightness 00-64 hex> 00 fe -- brightness only, no colour,
@@ -205,7 +211,11 @@ public class ButtonService extends Service {
     private void setRelay(int relay, boolean on) {
         lastSetTime = System.currentTimeMillis(); lastSetRelay = relay; lastSetState = on;
         byte code = (byte) (0xa0 + relay);
-        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), 0x00, (byte) 0xfe});
+        // Real switch frame for relays 1-3: last byte = relay id.
+        // Relay 4 has no physical button and its inbound last byte is 0,
+        // so keep the test frame for it (it is not exposed as a switch).
+        byte last = (relay >= 1 && relay <= 3) ? (byte) relay : (byte) 0x00;
+        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), last, (byte) 0xfe});
         // Optimistic state publish; the following query batch will
         // confirm the same state (suppressed as a press, see handleFrame).
         if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
