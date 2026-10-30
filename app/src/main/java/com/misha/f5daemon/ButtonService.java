@@ -1,6 +1,7 @@
 package com.misha.f5daemon;
 import android.app.*;
 import android.content.*;
+import android.media.AudioManager;
 import android.os.*;
 import android.provider.Settings;
 import android.util.Log;
@@ -13,17 +14,54 @@ import java.io.*;
 // Momentary: fc 00 00 00 01 <id 04..08> fe -> Buttons 4..8 (id IS the number)
 // Toggle: fc 00 00 a3/a2/a1 <state 01/00> <code 03/02/01> fe -> Relays 3/2/1
 //   (code IS the relay number)
+// Outbound (vendor McuTestActivity, proven live Oct 30, 2026):
+//   Relay N set: fc 00 00 a<N> <01 on / 00 off> 00 fe -- NO immediate frame;
+//   state is only visible via a subsequent query batch.
+//   Query: fc 00 00 aa ff 00 fe -> batch a1/a2/a3/a4 state frames.
+//   Night light: fc 00 1d 01 00 00 fe on, fc 00 1d 00 00 00 fe off,
+//   fc 00 1d 02 <brightness 00-64 hex> 00 fe -- brightness only, no colour,
+//   no status frame back (optimistic state in prefs).
+// Press vs virtual discernment (Oct 30, 2026 test): a physical press is
+// an immediate unsolicited single frame; a virtual set produces no frame,
+// only a later query batch. So: frames arriving shortly after a query
+// (or matching a just-sent set) are state only; all other relay frames
+// are physical presses and publish BOTH state and a press event. HA
+// toggle automations must trigger on the press event, not on state,
+// otherwise a lights->relay sync (external light change -> relay switch)
+// would re-trigger the toggle and loop.
 // Transport: MQTT discovery, topics tuyacontroller/<device-slug>/...
-// Relays are binary_sensor state, NOT switch, because no outbound MCU
-// command to change their state was found in vendor code. The two HA
-// switches are different: they control daemon options (Wake Lock,
-// Wake Screen), not the panel's relays.
+// su on this ROM: syntax is "su 0 <command...>", NOT "su -c ...".
+// The old "su -c input keyevent 224" failed with exit=1 for that reason
+// alone. App UID 10096 CAN escalate silently via "su 0 ..." (proven
+// Oct 30, 2026: su 10096 su 0 id -> uid=0, screen off/on via keyevents).
+// /proc/vendor audio nodes are world-writable, no su needed.
+// Brightness/rotation need Settings WRITE_SETTINGS (special grant, once,
+// via the app UI or appops); without it, commands log and HA reverts to
+// the polled actual value. Volume needs MODIFY_AUDIO_SETTINGS only.
 public class ButtonService extends Service {
     private static final String TAG = "F5Daemon";
     private volatile boolean running = false;
     private volatile boolean reconnectRunning = false;
+    private volatile boolean pollRunning = false;
     private PowerManager.WakeLock wakeLock;
+    private PowerManager.WakeLock screenWakeLock;
     private FileInputStream serialIn;
+    private FileOutputStream serialOut;
+    private final Object serialWriteLock = new Object();
+    private volatile long lastQueryTime = 0;
+    private volatile long lastSetTime = 0;
+    private volatile int lastSetRelay = -1;
+    private volatile boolean lastSetState = false;
+    private volatile int lastBrightness = -1;
+    private volatile int lastVolume = -1;
+    private volatile int lastRotation = -1;
+    private volatile boolean lastScreen = true;
+    private volatile String lastProcMute = "";
+    private volatile String lastProcAux = "";
+    private volatile String lastProcHorn = "";
+    private final java.util.ArrayList<int[]> pendingPresses = new java.util.ArrayList<int[]>();
+    private volatile boolean pressThreadRunning = false;
+    private volatile boolean connecting = false;
     private final MqttPublisher mqtt = new MqttPublisher();
     @Override public IBinder onBind(Intent i) { return null; }
     public static String deviceName(Context ctx, SharedPreferences p) {
@@ -65,23 +103,22 @@ public class ButtonService extends Service {
         startForeground(1, n);
         applyWakelock();
         mqtt.setCommandListener((topic, payload) -> {
-            try {
-                SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
-                SharedPreferences.Editor ed = p.edit();
-                boolean on = "ON".equalsIgnoreCase(payload.trim());
-                if (topic.endsWith("/wakelock/set")) { ed.putBoolean("wakelock_enabled", on); ed.apply(); applyWakelock(); }
-                else if (topic.endsWith("/wakescreen/set")) { ed.putBoolean("wakescreen_enabled", on); ed.apply(); }
-                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p));
-                Log.i(TAG, "mqtt command " + topic + " -> " + payload);
-            } catch (Exception e) { Log.w(TAG, "mqtt command failed: " + e, e); }
+            try { handleCommand(topic, payload); }
+            catch (Exception e) { Log.w(TAG, "mqtt command failed: " + e, e); }
         });
         if (!running) { running = true; new Thread(this::readLoop).start(); }
         if (!reconnectRunning) { reconnectRunning = true; new Thread(this::reconnectLoop).start(); }
+        if (!pollRunning) { pollRunning = true; new Thread(this::pollLoop).start(); }
         mqtt.disconnect();
         new Thread(() -> { try { connectNow(); } catch (Exception e) { Log.w(TAG, "mqtt connect on start failed, reconnect loop will retry: " + e); } }).start();
         return START_STICKY;
     }
     private void connectNow() throws Exception {
+        if (connecting) return;
+        connecting = true;
+        try { connectNowInner(); } finally { connecting = false; }
+    }
+    private void connectNowInner() throws Exception {
         SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
         String host = p.getString("host", "");
         if (host.isEmpty()) return;
@@ -89,6 +126,11 @@ public class ButtonService extends Service {
         try { port = Integer.parseInt(p.getString("port", "1883")); } catch (Exception ignored) {}
         mqtt.connect(host, port, p.getString("user", ""), PasswordStore.getPassword(p), deviceName(this, p));
         mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p));
+        // Sync relay states immediately, and publish current device states
+        // (brightness/volume/screen/rotation/proc/nightlight) so HA does
+        // not wait for a physical event or a poll tick.
+        sendQuery();
+        publishDeviceStates(true);
     }
     private void reconnectLoop() {
         while (reconnectRunning) {
@@ -99,8 +141,91 @@ public class ButtonService extends Service {
             try { Thread.sleep(30000); } catch (InterruptedException ignored) { break; }
         }
     }
+    // ---- su / privileged helpers ----
+    // Correct syntax on this ROM: su 0 <argv...>, no -c flag.
+    private String runSu(String... argv) {
+        try {
+            String[] cmd = new String[argv.length + 2];
+            cmd[0] = "su"; cmd[1] = "0";
+            System.arraycopy(argv, 0, cmd, 2, argv.length);
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            java.lang.Process proc = pb.start();
+            StringBuilder out = new StringBuilder();
+            BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()));
+            String line; while ((line = r.readLine()) != null) { if (out.length() > 0) out.append(" | "); out.append(line); }
+            int rc = proc.waitFor();
+            Log.i(TAG, "su " + String.join(" ", argv) + " exit=" + rc + " output=" + out);
+            return out.toString();
+        } catch (Exception e) { Log.w(TAG, "su failed: " + e); return null; }
+    }
+    private void wakeScreen() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm.isInteractive()) return;
+            // Try a screen wake lock first (no root), then su keyevent.
+            try {
+                if (screenWakeLock == null) {
+                    screenWakeLock = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP, "F5Daemon::screen");
+                    screenWakeLock.setReferenceCounted(false);
+                }
+                if (!screenWakeLock.isHeld()) screenWakeLock.acquire(10000);
+            } catch (Exception e) { Log.w(TAG, "screen wake lock failed: " + e); }
+            if (!pm.isInteractive()) runSu("input", "keyevent", "224");
+            Log.i(TAG, "wake screen, interactive=" + pm.isInteractive());
+        } catch (Exception e) { Log.w(TAG, "wake screen failed: " + e); }
+    }
+    private void setScreen(boolean on) {
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (on) { wakeScreen(); }
+        else {
+            if (screenWakeLock != null && screenWakeLock.isHeld()) screenWakeLock.release();
+            runSu("input", "keyevent", "26");
+        }
+        try { Thread.sleep(600); } catch (InterruptedException ignored) {}
+        try { mqtt.screen(pm.isInteractive()); } catch (Exception e) { Log.w(TAG, "screen publish failed: " + e); }
+    }
+    // ---- serial ----
+    private void writeSerial(byte[] frame) {
+        synchronized (serialWriteLock) {
+            try {
+                if (serialOut == null) { serialOut = new FileOutputStream("/dev/ttyAS2"); try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception ignored) {} }
+                serialOut.write(frame); serialOut.flush();
+                StringBuilder sb = new StringBuilder();
+                for (byte b : frame) sb.append(String.format("%02x ", b));
+                Log.i(TAG, "serial write: " + sb.toString().trim());
+            } catch (Exception e) { Log.w(TAG, "serial write failed: " + e); }
+        }
+    }
+    private void sendQuery() {
+        lastQueryTime = System.currentTimeMillis();
+        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, (byte) 0xaa, (byte) 0xff, 0x00, (byte) 0xfe});
+    }
+    private void setRelay(int relay, boolean on) {
+        lastSetTime = System.currentTimeMillis(); lastSetRelay = relay; lastSetState = on;
+        byte code = (byte) (0xa0 + relay);
+        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), 0x00, (byte) 0xfe});
+        // Optimistic state publish; the following query batch will
+        // confirm the same state (suppressed as a press, see handleFrame).
+        try { mqtt.relay(relay, on); } catch (Exception e) { Log.w(TAG, "relay publish failed: " + e); }
+        try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+        sendQuery();
+    }
+    private void setNightLight(boolean on, Integer brightness) {
+        SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+        int bright = brightness != null ? brightness : p.getInt("nightlight_brightness", 50);
+        if (brightness != null) { SharedPreferences.Editor ed = p.edit(); ed.putInt("nightlight_brightness", bright); ed.apply(); }
+        if (on) {
+            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x01, 0x00, 0x00, (byte) 0xfe});
+            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x02, (byte) bright, 0x00, (byte) 0xfe});
+        } else {
+            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x00, 0x00, 0x00, (byte) 0xfe});
+        }
+        SharedPreferences.Editor ed = p.edit(); ed.putBoolean("nightlight_on", on); ed.putInt("nightlight_brightness", bright); ed.apply();
+        try { mqtt.nightLight(on, bright); } catch (Exception e) { Log.w(TAG, "nightlight publish failed: " + e); }
+    }
     private void readLoop() {
-        try { Runtime.getRuntime().exec(new String[]{"sh","-c","stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception e) { Log.w(TAG, "stty failed", e); }
+        try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception e) { Log.w(TAG, "stty failed", e); }
         try {
             serialIn = new FileInputStream("/dev/ttyAS2");
             byte[] frame = new byte[7]; int pos = 0;
@@ -111,27 +236,6 @@ public class ButtonService extends Service {
                 if (pos == 7) { pos = 0; if (frame[6] == (byte) 0xfe) handleFrame(frame); }
             }
         } catch (Exception e) { if (running) Log.e(TAG, "serial read failed", e); }
-    }
-    private void wakeScreen() {
-        try {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            if (pm.isInteractive()) return;
-            // Best effort on this rooted panel: su + input keyevent 224
-            // (KEYCODE_WAKEUP). A normal app cannot hold a screen wake lock
-            // (DEVICE_POWER is signature-only). Captures su/input stderr
-            // too: exit=1 alone (seen Oct 29) does not say whether su
-            // denied the app uid or input itself failed.
-            ProcessBuilder pb = new ProcessBuilder("su", "-c", "input keyevent 224");
-            pb.redirectErrorStream(true);
-            java.lang.Process proc = pb.start();
-            StringBuilder out = new StringBuilder();
-            try {
-                BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()));
-                String line; while ((line = r.readLine()) != null) { if (out.length() > 0) out.append(" | "); out.append(line); }
-            } catch (Exception ignored) {}
-            int rc = proc.waitFor();
-            Log.i(TAG, "wake screen via su, exit=" + rc + " output=" + out);
-        } catch (Exception e) { Log.w(TAG, "wake screen failed (su unavailable?): " + e); }
     }
     private void handleFrame(byte[] f) {
         StringBuilder sb = new StringBuilder();
@@ -145,15 +249,202 @@ public class ButtonService extends Service {
                 mqtt.buttonPress(f[5] & 0xff);
             } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
-                mqtt.relay(f[5] & 0xff, f[4] == 0x01);
+                int relay = f[5] & 0xff;
+                boolean on = f[4] == 0x01;
+                mqtt.relay(relay, on);
+                boolean queryBatch = System.currentTimeMillis() - lastQueryTime < 5000;
+                boolean justSet = System.currentTimeMillis() - lastSetTime < 5000 && relay == lastSetRelay && on == lastSetState;
+                if (queryBatch || justSet) {
+                    // Daemon-initiated query/set: state only, never a press.
+                    return;
+                }
+                // Relay 4 is a query-only channel (no physical button);
+                // it is added to the pending batch below only as a marker
+                // that the batch was a query response, never published
+                // as a press itself (see publish filter).
+                // Otherwise, possibly a physical press -- but a query batch
+                // sent by another writer (adb, etc.) looks identical, so
+                // delay the press event 350 ms and batch it: if a relay-4
+                // frame arrives in that window, the whole batch was a query
+                // response and no press is published; otherwise every frame
+                // in the window was a real press and is published in order.
+                synchronized (pendingPresses) {
+                    pendingPresses.add(new int[]{relay, on ? 1 : 0});
+                    if (!pressThreadRunning) {
+                        pressThreadRunning = true;
+                        new Thread(() -> {
+                            try { Thread.sleep(350); } catch (InterruptedException ignored) {}
+                            synchronized (pendingPresses) {
+                                boolean hasRelay4 = false;
+                                for (int[] pr : pendingPresses) if (pr[0] == 4) hasRelay4 = true;
+                                if (!hasRelay4) {
+                                    for (int[] pr : pendingPresses) {
+                                        if (pr[0] < 1 || pr[0] > 3) continue;
+                                        try { mqtt.relayPress(pr[0]); Log.i(TAG, "physical relay press: relay=" + pr[0] + " on=" + (pr[1] == 1)); } catch (Exception e) { Log.w(TAG, "relay press publish failed: " + e); }
+                                    }
+                                }
+                                pendingPresses.clear();
+                                pressThreadRunning = false;
+                            }
+                        }).start();
+                    }
+                }
             }
         } catch (Exception e) { Log.w(TAG, "mqtt publish failed", e); }
     }
+    // ---- device state: get / set / poll ----
+    private int brightnessPct() {
+        try {
+            int v = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, -1);
+            if (v < 0) return -1;
+            return (int) Math.round(v * 100.0 / 255.0);
+        } catch (Exception e) { return -1; }
+    }
+    private int volumePct() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            if (max <= 0) return -1;
+            return (int) Math.round(am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100.0 / max);
+        } catch (Exception e) { return -1; }
+    }
+    private int rotationDeg() {
+        try {
+            int v = Settings.System.getInt(getContentResolver(), Settings.System.USER_ROTATION, -1);
+            if (v < 0) return -1;
+            return v * 90;
+        } catch (Exception e) { return -1; }
+    }
+    private String readProc(String path) {
+        try {
+            BufferedReader r = new BufferedReader(new FileReader(path));
+            String s = r.readLine(); r.close();
+            return s == null ? "" : s.trim();
+        } catch (Exception e) { return ""; }
+    }
+    private boolean writeProc(String path, String value) {
+        try {
+            FileOutputStream o = new FileOutputStream(path);
+            o.write(value.getBytes("UTF-8")); o.flush(); o.close();
+            return value.equals(readProc(path));
+        } catch (Exception e) { Log.w(TAG, "proc write failed " + path + ": " + e); return false; }
+    }
+    private void publishDeviceStates(boolean force) {
+        try {
+            int b = brightnessPct();
+            if (b >= 0 && (force || b != lastBrightness)) { lastBrightness = b; mqtt.brightness(b); }
+            int v = volumePct();
+            SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+            boolean muted = p.getBoolean("volume_muted", false);
+            if (v >= 0 && (force || v != lastVolume)) { lastVolume = v; mqtt.volume(v, muted); }
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            boolean scr = pm.isInteractive();
+            if (force || scr != lastScreen) { lastScreen = scr; mqtt.screen(scr); }
+            int r = rotationDeg();
+            if (r >= 0 && (force || r != lastRotation)) { lastRotation = r; mqtt.rotation(r); }
+            String pmv = readProc("/proc/vendor/mute_manual");
+            if (force || !pmv.equals(lastProcMute)) { lastProcMute = pmv; mqtt.procState("mute", pmv); }
+            String pav = readProc("/proc/vendor/aux_mode");
+            if (force || !pav.equals(lastProcAux)) { lastProcAux = pav; mqtt.procState("aux", pav); }
+            String phv = readProc("/proc/vendor/horn_mode");
+            if (force || !phv.equals(lastProcHorn)) { lastProcHorn = phv; mqtt.procState("horn", phv); }
+            if (force) {
+                boolean nlOn = p.getBoolean("nightlight_on", false);
+                int nlB = p.getInt("nightlight_brightness", 50);
+                mqtt.nightLight(nlOn, nlB);
+            }
+        } catch (Exception e) { Log.w(TAG, "device state publish failed: " + e); }
+    }
+    private void pollLoop() {
+        while (pollRunning) {
+            try { if (mqtt.connected()) publishDeviceStates(false); } catch (Exception e) { Log.w(TAG, "poll failed: " + e); }
+            try { Thread.sleep(5000); } catch (InterruptedException ignored) { break; }
+        }
+    }
+    // ---- MQTT commands ----
+    private void handleCommand(String topic, String payload) {
+        if (!topic.endsWith("/set") && !topic.endsWith("/press")) return;
+        String pl = payload == null ? "" : payload.trim();
+        SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+        Log.i(TAG, "mqtt command " + topic + " -> " + pl);
+        if (topic.endsWith("/wakelock/set")) {
+            boolean on = "ON".equalsIgnoreCase(pl);
+            SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakelock_enabled", on); ed.apply(); applyWakelock();
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+        } else if (topic.endsWith("/wakescreen/set")) {
+            boolean on = "ON".equalsIgnoreCase(pl);
+            SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakescreen_enabled", on); ed.apply();
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+        } else if (topic.matches(".*/relay/[0-9]+/set")) {
+            String[] parts = topic.split("/");
+            int relay = Integer.parseInt(parts[parts.length - 2]);
+            if (relay >= 1 && relay <= 4) setRelay(relay, "ON".equalsIgnoreCase(pl));
+        } else if (topic.endsWith("/nightlight/set")) {
+            setNightLight("ON".equalsIgnoreCase(pl), null);
+        } else if (topic.endsWith("/nightlight/brightness/set")) {
+            try { int b = Integer.parseInt(pl); if (b < 0) b = 0; if (b > 100) b = 100; setNightLight(true, b); } catch (Exception ignored) {}
+        } else if (topic.endsWith("/screen/set")) {
+            setScreen("ON".equalsIgnoreCase(pl));
+        } else if (topic.endsWith("/brightness/set")) {
+            try {
+                int pct = Integer.parseInt(pl); if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+                if (!Settings.System.canWrite(this)) { Log.w(TAG, "brightness set refused: WRITE_SETTINGS not granted"); publishDeviceStates(true); return; }
+                Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS_MODE, 0);
+                Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, pct * 255 / 100);
+                lastBrightness = pct; mqtt.brightness(pct);
+            } catch (Exception e) { Log.w(TAG, "brightness set failed: " + e); }
+        } else if (topic.endsWith("/volume/set")) {
+            try {
+                int pct = Integer.parseInt(pl); if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, pct * max / 100, 0);
+                if (pct > 0) { SharedPreferences.Editor ed = p.edit(); ed.putBoolean("volume_muted", false); ed.apply(); }
+                lastVolume = pct; mqtt.volume(pct, p.getBoolean("volume_muted", false));
+            } catch (Exception e) { Log.w(TAG, "volume set failed: " + e); }
+        } else if (topic.endsWith("/volume/mute/set")) {
+            try {
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                boolean mute = "ON".equalsIgnoreCase(pl);
+                if (mute) {
+                    int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                    if (cur > 0) { SharedPreferences.Editor ed = p.edit(); ed.putInt("volume_before_mute", cur); ed.putBoolean("volume_muted", true); ed.apply(); }
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
+                } else {
+                    int prev = p.getInt("volume_before_mute", max / 2);
+                    SharedPreferences.Editor ed = p.edit(); ed.putBoolean("volume_muted", false); ed.apply();
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, prev, 0);
+                }
+                publishDeviceStates(true);
+            } catch (Exception e) { Log.w(TAG, "volume mute failed: " + e); }
+        } else if (topic.endsWith("/rotation/set")) {
+            try {
+                int deg = Integer.parseInt(pl);
+                if (deg != 0 && deg != 90 && deg != 180 && deg != 270) return;
+                if (!Settings.System.canWrite(this)) { Log.w(TAG, "rotation set refused: WRITE_SETTINGS not granted"); publishDeviceStates(true); return; }
+                Settings.System.putInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0);
+                Settings.System.putInt(getContentResolver(), Settings.System.USER_ROTATION, deg / 90);
+                lastRotation = deg; mqtt.rotation(deg);
+            } catch (Exception e) { Log.w(TAG, "rotation set failed: " + e); }
+        } else if (topic.endsWith("/reboot/press")) {
+            Log.i(TAG, "reboot button pressed via HA, running su reboot");
+            runSu("reboot");
+        } else if (topic.endsWith("/proc/mute/set")) {
+            if (writeProc("/proc/vendor/mute_manual", pl)) mqtt.procState("mute", pl); else publishDeviceStates(true);
+        } else if (topic.endsWith("/proc/aux/set")) {
+            if (writeProc("/proc/vendor/aux_mode", pl)) mqtt.procState("aux", pl); else publishDeviceStates(true);
+        } else if (topic.endsWith("/proc/horn/set")) {
+            if (writeProc("/proc/vendor/horn_mode", pl)) mqtt.procState("horn", pl); else publishDeviceStates(true);
+        }
+    }
     @Override public void onDestroy() {
-        running = false; reconnectRunning = false;
+        running = false; reconnectRunning = false; pollRunning = false;
         try { if (serialIn != null) serialIn.close(); } catch (Exception ignored) {}
+        try { if (serialOut != null) serialOut.close(); } catch (Exception ignored) {}
         mqtt.disconnect();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (screenWakeLock != null && screenWakeLock.isHeld()) screenWakeLock.release();
         super.onDestroy();
     }
 }

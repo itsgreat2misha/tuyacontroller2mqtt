@@ -32,6 +32,33 @@ Port: `/dev/ttyAS2`, 115200 baud raw. Frames are 7 bytes, `fc` ... `fe`.
 | `fc 00 00 a2 <01/00> 02 fe` | Relay 2, toggle (old L2) |
 | `fc 00 00 a3 <01/00> 03 fe` | Relay 3, toggle (old L3) |
 
+Outbound, found in vendor `McuTestActivity` and proven live Oct 30, 2026
+(note the last data byte is `00` outbound, unlike the relay number
+inbound):
+
+| Frame | Meaning |
+|---|---|
+| `fc 00 00 a1 01 00 fe` / `fc 00 00 a1 00 00 fe` | Relay 1 on / off |
+| `fc 00 00 a2 01 00 fe` / `fc 00 00 a2 00 00 fe` | Relay 2 on / off |
+| `fc 00 00 a3 01 00 fe` / `fc 00 00 a3 00 00 fe` | Relay 3 on / off |
+| `fc 00 00 aa ff 00 fe` | Query relay states -> batch `a1/a2/a3/a4` |
+| `fc 00 1d 01 00 00 fe` | Night light on |
+| `fc 00 1d 00 00 00 fe` | Night light off |
+| `fc 00 1d 02 <00-64 hex> 00 fe` | Night light brightness 0-100 |
+
+A virtual relay set produces NO immediate frame; the new state is only
+visible via a subsequent query batch. A physical press produces an
+immediate unsolicited single frame. The daemon therefore publishes relay
+state on every frame, but a press event only for frames that are not part
+of a query batch and do not match a just-sent set. HA toggle automations
+must trigger on the press event, not on state, otherwise a lights->relay
+sync (external light change -> relay switch) re-triggers the toggle and
+loops. Relay 4 appears in every query batch (`a4`, code `00`) but has no
+physical button and no `/proc/vendor/relay_four` file; it is state-only,
+not exposed as a switch. `/proc/vendor/relay_first/second/third` do NOT
+reflect MCU relay state (verified live: they stayed `off` while the MCU
+reported Relay 1 on).
+
 The entity number IS the frame's id/code byte: relays 1-3, then momentary
 buttons 4-8 in reverse of their old top-to-bottom order (old buttons 5-1).
 Hold = one frame (indistinguishable from a tap). Double-tap = two frames;
@@ -55,8 +82,24 @@ there, motion is confirmed.
 ## Home Assistant entities (MQTT discovery)
 
 - `event` Button 4 .. Button 8 — press events
-- `binary_sensor` Relay 1, Relay 2, Relay 3 — toggle state, retained
+- `switch` Relay 1, Relay 2, Relay 3 — toggle state, retained, command
+  topic writes the outbound MCU frame above, then queries to confirm
+- `event` Relay 1 press, Relay 2 press, Relay 3 press — physical presses
+  only (see press vs virtual note above); toggle automations should
+  trigger on these, not on relay state
 - `binary_sensor` Motion — `device_class: motion`, retained
+- `light` Night Light — side-edge LED bar, brightness 0-100 only, no
+  colour (vendor code has no colour API); state is optimistic, the MCU
+  sends no status frame for it
+- `switch` Screen — on/off via su keyevents (see below)
+- `number` Screen Brightness — 0-100%, forces manual mode
+- `number` Music Volume — 0-100%, `switch` Music Mute (restores previous
+  volume on unmute)
+- `select` Rotation — 0/90/180/270 degrees (system rotation, panel has
+  no accelerometer)
+- `button` Reboot — su reboot, no state
+- `switch` Speaker Mute, `select` Audio Source (local/aux), `switch`
+  Horn — direct writes to world-writable `/proc/vendor` nodes, no su
 - `switch` Wake Lock, Wake Screen — daemon options (below), retained state
 - All entities share an availability topic with a Last Will: the daemon
   publishes retained `online` on connect, and the broker publishes
@@ -65,12 +108,15 @@ there, motion is confirmed.
   publishes `offline` first.
 
 On first start with a new numbering/naming scheme, the daemon publishes
-empty retained discovery for the old `f5_*` topics, so old entities are
-removed from HA instead of lingering as unavailable.
+empty retained discovery for the old `f5_*` topics, and v5 publishes
+empty discovery for the old relay `binary_sensor` topics, so old entities
+are removed from HA instead of lingering as unavailable. Note: relay
+entity ids change from `binary_sensor.*_relay_*` to `switch.*_relay_*`
+in v5; automations referencing the old ids need updating.
 
-Relay buttons are binary sensors, not switches: no outbound MCU command
-to change their state was found, so an HA switch would have nowhere to go.
-The two HA switches control daemon options, not relays.
+Brightness, volume, screen state, rotation, and `/proc` audio states are
+polled every 5 seconds and published on change, so changes made from
+Android Settings or Kiosk update HA, not just changes made from HA.
 
 ## App behaviour
 
@@ -99,10 +145,18 @@ The two HA switches control daemon options, not relays.
     can turn its display off without suspending serial reading. Turning
     it off lets the panel suspend, which stops the daemon until wake.
   - Wake Screen on button press (on by default, buttons only, not
-    motion): best-effort via `su -c input keyevent 224` on this rooted
-    panel, because a normal app cannot hold a screen wake lock
-    (DEVICE_POWER is signature-only). Without su it logs a warning and
-    does nothing.
+    motion): screen wake lock first, then su on this rooted panel.
+    su syntax on this ROM is `su 0 <command...>` — NOT `su -c ...`.
+    The old `su -c input keyevent 224` failed with exit 1 for that
+    reason alone; the app UID can escalate silently via `su 0 ...`
+    (proven Oct 30, 2026, including screen off/on keyevents).
+- Screen on/off and reboot use that su path. Brightness and rotation
+  use `Settings.System` and need the special Write Settings grant,
+  granted once from the app's settings screen (or via appops for
+  testing); without it, HA commands for those two are refused and HA
+  reverts to the polled actual value. Volume uses AudioManager
+  (`MODIFY_AUDIO_SETTINGS`, no special grant). `/proc/vendor` audio
+  nodes are world-writable, so the daemon writes them directly.
 - MQTT is a dependency-free raw MQTT 3.1.1 client (`MqttPublisher.java`).
   Paho was deliberately removed: its ResourceBundle log properties are
   not in a dex, so `MqttClient` construction crashed on Android with
@@ -151,11 +205,17 @@ but the fixed system rotation persists across reboots.
   third-party apps on this vendor ROM; the next step is a different
   mechanism (Kiosk plugin, JobScheduler, or external watchdog), not
   more BOOT_COMPLETED tweaks.
-- Wake screen via su failed on first live test (`exit=1` from the app
-  uid, while the same command works from adb shell as root). The service
-  now logs su's output as well as its exit code, to tell a su denial
-  apart from an `input` failure.
-- The panel clock resets to January on reboot (RTC persistence unresolved).
+- Wake screen via su: root cause found Oct 30, 2026 — wrong su syntax
+  (`su -c ...` instead of `su 0 ...`), not a permission denial. v5
+  uses the correct syntax, plus a screen wake lock fallback. Daemon's
+  own screen on/off via HA not yet live-tested at time of v5 push;
+  the underlying su keyevents were proven from the app UID via adb.
+- Reboot button (v5) not yet live-tested at time of push; test last,
+  as a reboot kills the daemon until it is manually restarted
+  (autostart still broken, see below).
+- The panel clock resets to January on reboot (RTC persistence unresolved
+  in the daemon; a manual `hwclock -u -w` after setting the time was
+  applied Oct 30, 2026, proof on next natural reboot deferred).
 - MQTT client id is per-device (`tuyacontroller-<device-slug>`), so a
   second panel does not kick the first off the broker; two panels with
   the same Android device name would still collide on unique_ids, so

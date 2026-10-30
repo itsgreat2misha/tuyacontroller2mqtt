@@ -61,7 +61,11 @@ public class MqttPublisher {
         connected = true;
         Log.i(TAG, "mqtt connected to " + host + ":" + port + " root=" + root);
         startReader(socket);
-        subscribe(root + "/+/set");
+        // Subscribe to everything under root, and filter in the service:
+        // only topics ending in /set or /press are commands. State topics
+        // are published by the daemon itself and must be ignored on receipt,
+        // otherwise the daemon would act on its own state publishes.
+        subscribe(root + "/#");
         publishAvailability("online");
         publishDiscovery();
     }
@@ -157,10 +161,43 @@ public class MqttPublisher {
             String cfg = "{\"name\":\"Button " + i + "\",\"unique_id\":\"" + slug + "_button_" + i + "\",\"state_topic\":\"" + root + "/button/" + i + "\",\"event_types\":[\"press\"]," + avail + dev + "}";
             doPublish("homeassistant/event/" + slug + "_button_" + i + "/config", cfg, true);
         }
+        // v5: relays are switches, not binary_sensors (outbound MCU frames
+        // found Oct 30, 2026 in McuTestActivity, proven live Oct 30).
+        // Remove the old binary_sensor discovery so it does not linger.
         for (int i = 1; i <= 3; i++) {
-            String cfg = "{\"name\":\"Relay " + i + "\",\"unique_id\":\"" + slug + "_relay_" + i + "\",\"state_topic\":\"" + root + "/relay/" + i + "\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\"," + avail + dev + "}";
-            doPublish("homeassistant/binary_sensor/" + slug + "_relay_" + i + "/config", cfg, true);
+            doPublish("homeassistant/binary_sensor/" + slug + "_relay_" + i + "/config", "", true);
+            String cfg = "{\"name\":\"Relay " + i + "\",\"unique_id\":\"" + slug + "_relay_" + i + "\",\"state_topic\":\"" + root + "/relay/" + i + "\",\"command_topic\":\"" + root + "/relay/" + i + "/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
+            doPublish("homeassistant/switch/" + slug + "_relay_" + i + "/config", cfg, true);
+            String ecfg = "{\"name\":\"Relay " + i + " press\",\"unique_id\":\"" + slug + "_relay_" + i + "_press\",\"state_topic\":\"" + root + "/relay/" + i + "/event\",\"event_types\":[\"press\"]," + avail + dev + "}";
+            doPublish("homeassistant/event/" + slug + "_relay_" + i + "_press/config", ecfg, true);
         }
+        // Night light: MCU side LED bar, brightness only, no colour
+        // (F5SmallLightUtil: setSwitch + setBright 0-100, no colour API).
+        // State is optimistic: the MCU sends no status frame for it.
+        String ncfg = "{\"name\":\"Night Light\",\"unique_id\":\"" + slug + "_night_light\",\"state_topic\":\"" + root + "/nightlight/state\",\"command_topic\":\"" + root + "/nightlight/set\",\"brightness_state_topic\":\"" + root + "/nightlight/brightness\",\"brightness_command_topic\":\"" + root + "/nightlight/brightness/set\",\"brightness_scale\":100,\"payload_on\":\"ON\",\"payload_off\":\"OFF\"," + avail + dev + "}";
+        doPublish("homeassistant/light/" + slug + "_night_light/config", ncfg, true);
+        // Device-level controls (v5). Brightness/volume state is polled
+        // by the service, so changes from Settings/Kiosk update HA too.
+        String scfg2 = "{\"name\":\"Screen\",\"unique_id\":\"" + slug + "_screen\",\"state_topic\":\"" + root + "/screen/state\",\"command_topic\":\"" + root + "/screen/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_screen/config", scfg2, true);
+        String bcfg = "{\"name\":\"Screen Brightness\",\"unique_id\":\"" + slug + "_brightness\",\"state_topic\":\"" + root + "/brightness/state\",\"command_topic\":\"" + root + "/brightness/set\",\"min\":0,\"max\":100,\"step\":1,\"unit_of_measurement\":\"%\"," + avail + dev + "}";
+        doPublish("homeassistant/number/" + slug + "_brightness/config", bcfg, true);
+        String vcfg = "{\"name\":\"Music Volume\",\"unique_id\":\"" + slug + "_volume_music\",\"state_topic\":\"" + root + "/volume/state\",\"command_topic\":\"" + root + "/volume/set\",\"min\":0,\"max\":100,\"step\":1,\"unit_of_measurement\":\"%\"," + avail + dev + "}";
+        doPublish("homeassistant/number/" + slug + "_volume_music/config", vcfg, true);
+        String mcfg2 = "{\"name\":\"Music Mute\",\"unique_id\":\"" + slug + "_volume_mute\",\"state_topic\":\"" + root + "/volume/mute/state\",\"command_topic\":\"" + root + "/volume/mute/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_volume_mute/config", mcfg2, true);
+        String rcfg = "{\"name\":\"Rotation\",\"unique_id\":\"" + slug + "_rotation\",\"state_topic\":\"" + root + "/rotation/state\",\"command_topic\":\"" + root + "/rotation/set\",\"options\":[\"0\",\"90\",\"180\",\"270\"]," + avail + dev + "}";
+        doPublish("homeassistant/select/" + slug + "_rotation/config", rcfg, true);
+        String rbcfg = "{\"name\":\"Reboot\",\"unique_id\":\"" + slug + "_reboot\",\"command_topic\":\"" + root + "/reboot/press\",\"payload_press\":\"PRESS\"," + avail + dev + "}";
+        doPublish("homeassistant/button/" + slug + "_reboot/config", rbcfg, true);
+        // /proc/vendor audio nodes: world-writable, no root needed.
+        // Values are the literal file contents ("on"/"off", "local"/"aux").
+        String pmcfg = "{\"name\":\"Speaker Mute\",\"unique_id\":\"" + slug + "_proc_mute\",\"state_topic\":\"" + root + "/proc/mute/state\",\"command_topic\":\"" + root + "/proc/mute/set\",\"payload_on\":\"on\",\"payload_off\":\"off\",\"state_on\":\"on\",\"state_off\":\"off\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_proc_mute/config", pmcfg, true);
+        String pacfg = "{\"name\":\"Audio Source\",\"unique_id\":\"" + slug + "_proc_aux\",\"state_topic\":\"" + root + "/proc/aux/state\",\"command_topic\":\"" + root + "/proc/aux/set\",\"options\":[\"local\",\"aux\"]," + avail + dev + "}";
+        doPublish("homeassistant/select/" + slug + "_proc_aux/config", pacfg, true);
+        String phcfg = "{\"name\":\"Horn\",\"unique_id\":\"" + slug + "_proc_horn\",\"state_topic\":\"" + root + "/proc/horn/state\",\"command_topic\":\"" + root + "/proc/horn/set\",\"payload_on\":\"on\",\"payload_off\":\"off\",\"state_on\":\"on\",\"state_off\":\"off\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_proc_horn/config", phcfg, true);
         String mcfg = "{\"name\":\"Motion\",\"unique_id\":\"" + slug + "_motion\",\"state_topic\":\"" + root + "/motion\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"device_class\":\"motion\"," + avail + dev + "}";
         doPublish("homeassistant/binary_sensor/" + slug + "_motion/config", mcfg, true);
         String wcfg = "{\"name\":\"Wake Lock\",\"unique_id\":\"" + slug + "_wakelock\",\"state_topic\":\"" + root + "/wakelock/state\",\"command_topic\":\"" + root + "/wakelock/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
@@ -171,6 +208,13 @@ public class MqttPublisher {
     }
     public synchronized void buttonPress(int button) { try { publishRaw(root + "/button/" + button, "{\"event_type\":\"press\"}", false); } catch (Exception e) { Log.w(TAG, "mqtt press failed: " + e, e); } }
     public synchronized void relay(int relay, boolean on) { try { publishRaw(root + "/relay/" + relay, on ? "ON" : "OFF", true); } catch (Exception e) { Log.w(TAG, "mqtt relay failed: " + e, e); } }
+    public synchronized void relayPress(int relay) { try { publishRaw(root + "/relay/" + relay + "/event", "{\"event_type\":\"press\"}", false); } catch (Exception e) { Log.w(TAG, "mqtt relay press failed: " + e, e); } }
     public synchronized void motion(boolean present) { try { publishRaw(root + "/motion", present ? "ON" : "OFF", true); } catch (Exception e) { Log.w(TAG, "mqtt motion failed: " + e, e); } }
+    public synchronized void nightLight(boolean on, int brightness) { try { publishRaw(root + "/nightlight/state", on ? "ON" : "OFF", true); publishRaw(root + "/nightlight/brightness", String.valueOf(brightness), true); } catch (Exception e) { Log.w(TAG, "mqtt nightlight failed: " + e, e); } }
+    public synchronized void screen(boolean on) { try { publishRaw(root + "/screen/state", on ? "ON" : "OFF", true); } catch (Exception e) { Log.w(TAG, "mqtt screen failed: " + e, e); } }
+    public synchronized void brightness(int pct) { try { publishRaw(root + "/brightness/state", String.valueOf(pct), true); } catch (Exception e) { Log.w(TAG, "mqtt brightness failed: " + e, e); } }
+    public synchronized void volume(int pct, boolean muted) { try { publishRaw(root + "/volume/state", String.valueOf(pct), true); publishRaw(root + "/volume/mute/state", muted ? "ON" : "OFF", true); } catch (Exception e) { Log.w(TAG, "mqtt volume failed: " + e, e); } }
+    public synchronized void rotation(int deg) { try { publishRaw(root + "/rotation/state", String.valueOf(deg), true); } catch (Exception e) { Log.w(TAG, "mqtt rotation failed: " + e, e); } }
+    public synchronized void procState(String name, String value) { try { publishRaw(root + "/proc/" + name + "/state", value, true); } catch (Exception e) { Log.w(TAG, "mqtt proc failed: " + e, e); } }
     private void closeQuietly() { try { if (socket != null) socket.close(); } catch (Exception ignored) {} socket = null; connected = false; }
 }

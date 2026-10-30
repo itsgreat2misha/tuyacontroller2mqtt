@@ -62,10 +62,18 @@ public class MainActivity extends Activity {
             startForegroundService(new Intent(this, ButtonService.class));
             Toast.makeText(this, "Saved, daemon starting and publishing to Home Assistant", Toast.LENGTH_SHORT).show();
         });
+        Button grantWrite = new Button(this);
+        grantWrite.setText(android.provider.Settings.System.canWrite(this) ? "Write Settings: granted" : "Grant Write Settings (brightness / rotation)");
+        grantWrite.setOnClickListener(v -> {
+            if (android.provider.Settings.System.canWrite(this)) { Toast.makeText(this, "Write Settings already granted", Toast.LENGTH_SHORT).show(); return; }
+            Intent i = new Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS);
+            i.setData(android.net.Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        });
         TextView note = new TextView(this);
-        note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first. Turning off the wake lock lets the panel suspend, which stops serial reading until it wakes. Wake screen uses su on this rooted panel; without it, it logs a warning and does nothing.");
+        note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first. Turning off the wake lock lets the panel suspend, which stops serial reading until it wakes. Screen brightness and rotation need Write Settings (button above, granted once in Android Settings); without it, HA commands for those two are refused and HA reverts to the actual value. Screen on/off and reboot use su on this rooted panel (syntax: su 0 <command>); volume uses AudioManager; /proc audio switches write directly to /proc/vendor.");
         root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show);
-        root.addView(wakelock); root.addView(wakescreen); root.addView(save); root.addView(note);
+        root.addView(wakelock); root.addView(wakescreen); root.addView(save); root.addView(grantWrite); root.addView(note);
         scroll.addView(root); setContentView(scroll);
     }
     private EditText field(String value, String hint, int inputType, int ime) {
