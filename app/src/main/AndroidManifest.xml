@@ -7,8 +7,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30" />
-    <application android:label="F5 Panel Daemon" android:theme="@android:style/Theme.Material">
-        <activity android:name=".MainActivity" android:exported="true">
+    <application android:label="Tuya Controller" android:theme="@android:style/Theme.Material">
+        <activity android:name=".MainActivity" android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <!-- No screenOrientation lock: the activity must follow the
+                 system rotation, so a vertically mounted panel can rotate
+                 its UI. configChanges above keeps typed (unsaved) fields
+                 across a rotation instead of recreating the activity. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

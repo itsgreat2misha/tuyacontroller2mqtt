@@ -1,8 +1,10 @@
 # tuyacontroller2mqtt
 
-Android daemon for the Tuya F5-3 entryway panel (Allwinner A133, Android 11)
-that turns its 8 below-screen physical buttons and its presence sensor into
-Home Assistant entities over MQTT discovery.
+Android daemon for Tuya Android controllers (starting with the F5-3
+entryway panel, Allwinner A133, Android 11) that turns their physical
+buttons and motion sensor into Home Assistant entities over MQTT discovery.
+Entity names carry no F5 prefix; the HA device name is the panel's Android
+device name, and topics/unique_ids are `tuyacontroller/<device-slug>/...`.
 
 ## Why this exists
 
@@ -36,18 +38,39 @@ Hold = one frame (indistinguishable from a tap). Double-tap = two frames;
 detect it by timing in HA if needed. Toggle vs momentary is fixed by the MCU
 frame type, not a configurable mode.
 
+## Motion vs presence — research note
+
+The F5 manual calls the sensor "Induction (Radar PIR)" and describes
+waving a hand to trigger it, and vendor code calls the frames
+`F5MessageSensorChange`, not presence. Traditional PIR detects movement
+only; true mmWave presence sensors detect a stationary person (breathing,
+micro-motion). No F5 spec claims static detection, and the observed
+behaviour (fires on walk-up, clears after 30-60 s idle) fits motion.
+So the entity is Motion with `device_class: motion`, not Occupancy.
+Decisive test not yet done: stand still in front of the panel for over
+60 s — if the sensor stays on, it is static presence and the class/name
+should flip to Occupancy/Presence; if it clears despite you still being
+there, motion is confirmed.
+
 ## Home Assistant entities (MQTT discovery)
 
-- `event.f5_button_4` .. `event.f5_button_8` — press events
-- `binary_sensor.f5_relay_1`, `f5_relay_2`, `f5_relay_3` — toggle state, retained
-- `binary_sensor.f5_presence` — motion, retained
+- `event` Button 4 .. Button 8 — press events
+- `binary_sensor` Relay 1, Relay 2, Relay 3 — toggle state, retained
+- `binary_sensor` Motion — `device_class: motion`, retained
+- `switch` Wake Lock, Wake Screen — daemon options (below), retained state
+- All entities share an availability topic with a Last Will: the daemon
+  publishes retained `online` on connect, and the broker publishes
+  retained `offline` if the daemon dies (keepalive 60 s, PINGREQ every
+  30 s, so detection is within ~90 s). A graceful service stop also
+  publishes `offline` first.
 
-On first start with the v2 numbering, the daemon publishes empty retained
-discovery for the old `f5_button_1`..`5` and `f5_l1`..`l3` topics, so the
-old entities are removed from HA instead of lingering as unavailable.
+On first start with a new numbering/naming scheme, the daemon publishes
+empty retained discovery for the old `f5_*` topics, so old entities are
+removed from HA instead of lingering as unavailable.
 
 Relay buttons are binary sensors, not switches: no outbound MCU command
 to change their state was found, so an HA switch would have nowhere to go.
+The two HA switches control daemon options, not relays.
 
 ## App behaviour
 
@@ -71,6 +94,15 @@ to change their state was found, so an HA switch would have nowhere to go.
 - On Save, the service connects immediately and publishes discovery, so
   entities appear without a button press first, and a 30-second reconnect
   loop covers broker restarts.
+- Options, in both the app config page and HA switches (same prefs):
+  - Wake Lock (on by default): holds a partial wake lock so the panel
+    can turn its display off without suspending serial reading. Turning
+    it off lets the panel suspend, which stops the daemon until wake.
+  - Wake Screen on button press (on by default, buttons only, not
+    motion): best-effort via `su -c input keyevent 224` on this rooted
+    panel, because a normal app cannot hold a screen wake lock
+    (DEVICE_POWER is signature-only). Without su it logs a warning and
+    does nothing.
 - MQTT is a dependency-free raw MQTT 3.1.1 client (`MqttPublisher.java`).
   Paho was deliberately removed: its ResourceBundle log properties are
   not in a dex, so `MqttClient` construction crashed on Android with
@@ -98,3 +130,25 @@ adb shell am start-foreground-service -n com.misha.f5daemon/.ButtonService
 The settings screen is a ScrollView so the small panel screen + keyboard
 cannot hide Save. Fields are single-line, Enter moves to the next field,
 and the password field is masked with a Show password checkbox.
+The activity has no orientation lock and handles rotation itself, so it
+follows the system rotation: on a vertically mounted panel, set
+`settings put system user_rotation 1` (or 3, for the other direction)
+— the panel has no accelerometer, so sensor auto-rotate cannot work,
+but the fixed system rotation persists across reboots.
+
+## Known open items (Oct 29, 2026)
+
+- Boot autostart did NOT fire on the first reboot test: no service or
+  daemon log at 4 min uptime, though the system BOOT_COMPLETED broadcast
+  finished, and a manual BOOT_COMPLETED broadcast started the service
+  immediately. `BootReceiver` now logs on receipt, so the next reboot
+  test will show whether delivery or the service start is at fault.
+- Wake screen via su failed on first live test (`exit=1` from the app
+  uid, while the same command works from adb shell as root). The service
+  now logs su's output as well as its exit code, to tell a su denial
+  apart from an `input` failure.
+- The panel clock resets to January on reboot (RTC persistence unresolved).
+- MQTT client id is per-device (`tuyacontroller-<device-slug>`), so a
+  second panel does not kick the first off the broker; two panels with
+  the same Android device name would still collide on unique_ids, so
+  give each panel a distinct device name in settings.

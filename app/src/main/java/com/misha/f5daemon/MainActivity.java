@@ -13,10 +13,14 @@ import android.widget.*;
 // Device name defaults to the Android device name (Settings.Global
 // device_name, e.g. "Entryway assistant") and can be edited here before
 // the daemon is enabled; it becomes the HA device name in discovery.
+// Options are shared with HA: the Wake Lock / Wake Screen switches in HA
+// write the same prefs these checkboxes edit, and vice versa.
 public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setScrollbarFadingEnabled(false);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = 32; root.setPadding(pad, pad, pad, pad);
@@ -29,8 +33,13 @@ public class MainActivity extends Activity {
         CheckBox show = new CheckBox(this); show.setText("Show password");
         show.setOnCheckedChangeListener((v, checked) -> {
             pass.setInputType(checked ? InputType.TYPE_CLASS_TEXT : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            pass.setTransformationMethod(checked ? null : android.text.method.PasswordTransformationMethod.getInstance());
             pass.setSelection(pass.getText().length());
         });
+        CheckBox wakelock = new CheckBox(this); wakelock.setText("Hold wake lock (prevent suspend, keep daemon reading)");
+        wakelock.setChecked(ButtonService.wakelockEnabled(p));
+        CheckBox wakescreen = new CheckBox(this); wakescreen.setText("Wake screen on button press (not on motion)");
+        wakescreen.setChecked(ButtonService.wakescreenEnabled(p));
         Button save = new Button(this); save.setText("Save and start daemon");
         save.setOnClickListener(v -> {
             int portNum;
@@ -42,6 +51,8 @@ public class MainActivity extends Activity {
                 ed.putString("host", host.getText().toString().trim());
                 ed.putString("port", String.valueOf(portNum));
                 ed.putString("user", user.getText().toString().trim());
+                ed.putBoolean("wakelock_enabled", wakelock.isChecked());
+                ed.putBoolean("wakescreen_enabled", wakescreen.isChecked());
                 PasswordStore.setPassword(ed, pass.getText().toString());
                 ed.apply();
             } catch (Exception e) {
@@ -52,8 +63,9 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Saved, daemon starting and publishing to Home Assistant", Toast.LENGTH_SHORT).show();
         });
         TextView note = new TextView(this);
-        note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first.");
-        root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show); root.addView(save); root.addView(note);
+        note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first. Turning off the wake lock lets the panel suspend, which stops serial reading until it wakes. Wake screen uses su on this rooted panel; without it, it logs a warning and does nothing.");
+        root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show);
+        root.addView(wakelock); root.addView(wakescreen); root.addView(save); root.addView(note);
         scroll.addView(root); setContentView(scroll);
     }
     private EditText field(String value, String hint, int inputType, int ime) {
