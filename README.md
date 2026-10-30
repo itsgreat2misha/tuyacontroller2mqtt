@@ -200,32 +200,51 @@ and the password field is masked with a Show password checkbox.
 The activity has no orientation lock and handles rotation itself, so it
 follows the system rotation: on a vertically mounted panel, set
 `settings put system user_rotation 1` (or 3, for the other direction)
-— the panel has no accelerometer, so sensor auto-rotate cannot work,
-but the fixed system rotation persists across reboots.
+— the panel has no accelerometer, so sensor auto-rotate cannot work.
+Note: `user_rotation` does NOT persist across reboots on this panel
+(observed Oct 30, 2026: it reverted to 0 after reboot), so rotation is
+re-applied at every Kiosk start by the Autostart plugin commands below,
+not left to the setting alone.
+
+## Autostart on this panel (working, verified Oct 30, 2026)
+
+The daemon's `BootReceiver` (BOOT_COMPLETED + QUICKBOOT_POWERON +
+LOCKED_BOOT_COMPLETED, directBootAware) is retained for other ROMs, but
+on this vendor ROM its delivery is broken: after three reboot tests
+plus battery-whitelist / ACTIVE-bucket / explicit re-enable, the
+receiver still never logged, and on Oct 30 an explicit broadcast to
+it — even with a custom, non-protected action — was skipped by
+ActivityManager (no delivery, dispatch time epoch 0), while the same
+mechanism delivered to Kiosk Satellite's own manifest receiver. So
+do not keep tweaking BOOT_COMPLETED on this panel.
+
+The working autostart path is the Kiosk Satellite Autostart plugin
+(`kiosk-autostart`, Once per boot, backend Auto = Root first):
+- `Start daemon service`: `/system/bin/am`,
+  `start-foreground-service -n com.misha.f5daemon/.ButtonService`
+  (direct service start, proven live; the old BOOT_COMPLETED broadcast
+  command "succeeded" with exit 0 while the receiver never ran, so
+  exit 0 from a broadcast proves nothing here).
+- `Rotation 90`: `/system/bin/settings`, `put system user_rotation 1`
+- `Rotation auto off`: `/system/bin/settings`,
+  `put system accelerometer_rotation 0`
+
+Verified on a real reboot Oct 30, 2026 (new boot ID
+ab277fec-1a47-45df-a59d-f5cbd882db5f): Kiosk pid 1015, daemon service
+up with a fresh ServiceRecord, `user_rotation=1`, and the plugin's
+runState for the new boot marked all four commands (daemon service,
+both rotation commands, Shizuku).
 
 ## Known open items (Oct 30, 2026)
-
-- Boot autostart still does NOT fire, after three reboot tests. v4.1
-  broadened the receiver (BOOT_COMPLETED + QUICKBOOT_POWERON +
-  LOCKED_BOOT_COMPLETED, receiver directBootAware, LOCKED_BOOT_COMPLETED
-  logged only because the service reads credential-encrypted prefs that
-  are unavailable before unlock) and the panel was given a battery
-  optimization exemption (deviceidle whitelist) plus an ACTIVE standby
-  bucket, with the receiver explicitly re-enabled. On the Oct 30 reboot
-  test the receiver still never logged, and the daemon was absent from
-  the full broadcast dump, even though the whitelist and bucket survived
-  the reboot. Conclusion: BOOT_COMPLETED delivery is broken for
-  third-party apps on this vendor ROM; the next step is a different
-  mechanism (Kiosk plugin, JobScheduler, or external watchdog), not
-  more BOOT_COMPLETED tweaks.
 - Wake screen via su: root cause found Oct 30, 2026 — wrong su syntax
   (`su -c ...` instead of `su 0 ...`), not a permission denial. v5
   uses the correct syntax, plus a screen wake lock fallback. Daemon's
   own screen on/off via HA not yet live-tested at time of v5 push;
   the underlying su keyevents were proven from the app UID via adb.
-- Reboot button (v5) not yet live-tested at time of push; test last,
-  as a reboot kills the daemon until it is manually restarted
-  (autostart still broken, see below).
+- Reboot button (v5) live-tested Oct 30, 2026 (HA Reboot button):
+  the panel reboots and the daemon + rotation come back via the
+  Autostart plugin (see above), so a reboot no longer strands the
+  daemon.
 - The panel clock resets to January on reboot (RTC persistence unresolved
   in the daemon; a manual `hwclock -u -w` after setting the time was
   applied Oct 30, 2026, proof on next natural reboot deferred).
