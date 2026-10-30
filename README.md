@@ -83,7 +83,11 @@ there, motion is confirmed.
 
 - `event` Button 4 .. Button 8 — press events
 - `switch` Relay 1, Relay 2, Relay 3 — toggle state, retained, command
-  topic writes the outbound MCU frame above, then queries to confirm
+  topic writes the outbound MCU frame above, then queries to confirm.
+  v6: serial writes are spaced 200 ms apart (back-to-back nightlight
+  ON->brightness frames were not reliably acted on in v5); relay-4
+  query marker fixed (its inbound code byte is 0, f[3]=0xa4 is the
+  marker, not f[5])
 - `event` Relay 1 press, Relay 2 press, Relay 3 press — physical presses
   only (see press vs virtual note above); toggle automations should
   trigger on these, not on relay state
@@ -93,14 +97,21 @@ there, motion is confirmed.
   sends no status frame for it
 - `switch` Screen — on/off via su keyevents (see below)
 - `number` Screen Brightness — 0-100%, forces manual mode
-- `number` Music Volume — 0-100%, `switch` Music Mute (restores previous
-  volume on unmute)
+- `number` Media Volume (STREAM_MUSIC, renamed from Music Volume in v6)
+  — 0-100%, plus System, Notification, Alarm, Ring, and Voice Call
+  volume numbers (all % of their stream max; Android has no single
+  master volume, MUSIC is what volume buttons / media use). Music Mute,
+  Audio Source, and Horn were removed in v6 (unused).
 - `select` Rotation — 0/90/180/270 degrees (system rotation, panel has
   no accelerometer)
 - `button` Reboot — su reboot, no state
 - `switch` Speaker Mute, `select` Audio Source (local/aux), `switch`
   Horn — direct writes to world-writable `/proc/vendor` nodes, no su
-- `switch` Wake Lock, Wake Screen — daemon options (below), retained state
+- `switch` Wake Lock, Wake Screen with Button — daemon options (below),
+  retained state. All tracked states (screen, brightness, volumes,
+  rotation, relays, motion, wake options, nightlight) are re-published
+  every 5 s in v6, so a lost QoS 0 message heals within one poll tick
+  instead of leaving HA stale until the next change.
 - All entities share an availability topic with a Last Will: the daemon
   publishes retained `online` on connect, and the broker publishes
   retained `offline` if the daemon dies (keepalive 60 s, PINGREQ every

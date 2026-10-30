@@ -57,8 +57,8 @@ public class ButtonService extends Service {
     private volatile int lastRotation = -1;
     private volatile boolean lastScreen = true;
     private volatile String lastProcMute = "";
-    private volatile String lastProcAux = "";
-    private volatile String lastProcHorn = "";
+    private volatile int[] lastRelayState = new int[]{-1, -1, -1, -1, -1};
+    private volatile int lastMotionState = -1;
     private final java.util.ArrayList<int[]> pendingPresses = new java.util.ArrayList<int[]>();
     private volatile boolean pressThreadRunning = false;
     private volatile boolean connecting = false;
@@ -183,7 +183,7 @@ public class ButtonService extends Service {
             runSu("input", "keyevent", "26");
         }
         try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-        try { mqtt.screen(pm.isInteractive()); } catch (Exception e) { Log.w(TAG, "screen publish failed: " + e); }
+        try { boolean scr = pm.isInteractive(); lastScreen = scr; mqtt.screen(scr); } catch (Exception e) { Log.w(TAG, "screen publish failed: " + e); }
     }
     // ---- serial ----
     private void writeSerial(byte[] frame) {
@@ -191,6 +191,7 @@ public class ButtonService extends Service {
             try {
                 if (serialOut == null) { serialOut = new FileOutputStream("/dev/ttyAS2"); try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception ignored) {} }
                 serialOut.write(frame); serialOut.flush();
+                try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                 StringBuilder sb = new StringBuilder();
                 for (byte b : frame) sb.append(String.format("%02x ", b));
                 Log.i(TAG, "serial write: " + sb.toString().trim());
@@ -207,6 +208,7 @@ public class ButtonService extends Service {
         writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), 0x00, (byte) 0xfe});
         // Optimistic state publish; the following query batch will
         // confirm the same state (suppressed as a press, see handleFrame).
+        if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
         try { mqtt.relay(relay, on); } catch (Exception e) { Log.w(TAG, "relay publish failed: " + e); }
         try { Thread.sleep(200); } catch (InterruptedException ignored) {}
         sendQuery();
@@ -242,15 +244,35 @@ public class ButtonService extends Service {
         for (byte b : f) sb.append(String.format("%02x ", b));
         Log.i(TAG, "frame: " + sb.toString().trim());
         try {
-            if (f[2] == 0x1c) mqtt.motion(true);
-            else if (f[2] == 0x0c) mqtt.motion(false);
+            if (f[2] == 0x1c) { lastMotionState = 1; mqtt.motion(true); }
+            else if (f[2] == 0x0c) { lastMotionState = 0; mqtt.motion(false); }
             else if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 mqtt.buttonPress(f[5] & 0xff);
             } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
+                // Relay 4 is a query-only channel: its frame is
+                // fc 00 00 a4 00 00 fe, i.e. f[5] is 0, NOT 4. The old
+                // code read relay = f[5], so it never saw relay 4 and
+                // the query-batch marker below never fired -- a manual
+                // query (adb cat) then published false press events.
+                // Detect a4 via f[3] and add a marker entry (relay=4).
+                if ((f[3] & 0xff) == 0xa4) {
+                    synchronized (pendingPresses) {
+                        pendingPresses.add(new int[]{4, 0});
+                        if (!pressThreadRunning) {
+                            pressThreadRunning = true;
+                            new Thread(() -> {
+                                try { Thread.sleep(350); } catch (InterruptedException ignored) {}
+                                synchronized (pendingPresses) { pendingPresses.clear(); pressThreadRunning = false; }
+                            }).start();
+                        }
+                    }
+                    return;
+                }
                 int relay = f[5] & 0xff;
                 boolean on = f[4] == 0x01;
+                if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
                 mqtt.relay(relay, on);
                 boolean queryBatch = System.currentTimeMillis() - lastQueryTime < 5000;
                 boolean justSet = System.currentTimeMillis() - lastSetTime < 5000 && relay == lastSetRelay && on == lastSetState;
@@ -300,13 +322,19 @@ public class ButtonService extends Service {
             return (int) Math.round(v * 100.0 / 255.0);
         } catch (Exception e) { return -1; }
     }
-    private int volumePct() {
+    private int volumePct() { return volumePctFor(AudioManager.STREAM_MUSIC); }
+    private int volumePctFor(int stream) {
         try {
             AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-            int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            int max = am.getStreamMaxVolume(stream);
             if (max <= 0) return -1;
-            return (int) Math.round(am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100.0 / max);
+            return (int) Math.round(am.getStreamVolume(stream) * 100.0 / max);
         } catch (Exception e) { return -1; }
+    }
+    private void setVolumePct(int stream, int pct) {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        int max = am.getStreamMaxVolume(stream);
+        am.setStreamVolume(stream, pct * max / 100, 0);
     }
     private int rotationDeg() {
         try {
@@ -335,8 +363,8 @@ public class ButtonService extends Service {
             if (b >= 0 && (force || b != lastBrightness)) { lastBrightness = b; mqtt.brightness(b); }
             int v = volumePct();
             SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
-            boolean muted = p.getBoolean("volume_muted", false);
-            if (v >= 0 && (force || v != lastVolume)) { lastVolume = v; mqtt.volume(v, muted); }
+            if (v >= 0 && (force || v != lastVolume)) { lastVolume = v; mqtt.volume(v, false); }
+            // Stream volumes are published on force (above) and via their own command handlers; poll change-checks for them are covered by the force re-publish in pollLoop.
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             boolean scr = pm.isInteractive();
             if (force || scr != lastScreen) { lastScreen = scr; mqtt.screen(scr); }
@@ -344,20 +372,27 @@ public class ButtonService extends Service {
             if (r >= 0 && (force || r != lastRotation)) { lastRotation = r; mqtt.rotation(r); }
             String pmv = readProc("/proc/vendor/mute_manual");
             if (force || !pmv.equals(lastProcMute)) { lastProcMute = pmv; mqtt.procState("mute", pmv); }
-            String pav = readProc("/proc/vendor/aux_mode");
-            if (force || !pav.equals(lastProcAux)) { lastProcAux = pav; mqtt.procState("aux", pav); }
-            String phv = readProc("/proc/vendor/horn_mode");
-            if (force || !phv.equals(lastProcHorn)) { lastProcHorn = phv; mqtt.procState("horn", phv); }
             if (force) {
                 boolean nlOn = p.getBoolean("nightlight_on", false);
                 int nlB = p.getInt("nightlight_brightness", 50);
                 mqtt.nightLight(nlOn, nlB);
+                // QoS 0 state messages can be lost; re-publishing the
+                // tracked states every poll heals a stale HA entity
+                // within one poll tick instead of waiting for a change.
+                for (int rr = 1; rr <= 3; rr++) if (lastRelayState[rr] >= 0) mqtt.relay(rr, lastRelayState[rr] == 1);
+                if (lastMotionState >= 0) mqtt.motion(lastMotionState == 1);
+                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p));
+                mqtt.volumeStream("system", volumePctFor(AudioManager.STREAM_SYSTEM));
+                mqtt.volumeStream("notification", volumePctFor(AudioManager.STREAM_NOTIFICATION));
+                mqtt.volumeStream("alarm", volumePctFor(AudioManager.STREAM_ALARM));
+                mqtt.volumeStream("ring", volumePctFor(AudioManager.STREAM_RING));
+                mqtt.volumeStream("voice", volumePctFor(AudioManager.STREAM_VOICE_CALL));
             }
         } catch (Exception e) { Log.w(TAG, "device state publish failed: " + e); }
     }
     private void pollLoop() {
         while (pollRunning) {
-            try { if (mqtt.connected()) publishDeviceStates(false); } catch (Exception e) { Log.w(TAG, "poll failed: " + e); }
+            try { if (mqtt.connected()) publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "poll failed: " + e); }
             try { Thread.sleep(5000); } catch (InterruptedException ignored) { break; }
         }
     }
@@ -399,25 +434,18 @@ public class ButtonService extends Service {
                 AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
                 int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
                 am.setStreamVolume(AudioManager.STREAM_MUSIC, pct * max / 100, 0);
-                if (pct > 0) { SharedPreferences.Editor ed = p.edit(); ed.putBoolean("volume_muted", false); ed.apply(); }
-                lastVolume = pct; mqtt.volume(pct, p.getBoolean("volume_muted", false));
+                lastVolume = pct; mqtt.volume(pct, false);
             } catch (Exception e) { Log.w(TAG, "volume set failed: " + e); }
-        } else if (topic.endsWith("/volume/mute/set")) {
-            try {
-                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-                int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-                boolean mute = "ON".equalsIgnoreCase(pl);
-                if (mute) {
-                    int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
-                    if (cur > 0) { SharedPreferences.Editor ed = p.edit(); ed.putInt("volume_before_mute", cur); ed.putBoolean("volume_muted", true); ed.apply(); }
-                    am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
-                } else {
-                    int prev = p.getInt("volume_before_mute", max / 2);
-                    SharedPreferences.Editor ed = p.edit(); ed.putBoolean("volume_muted", false); ed.apply();
-                    am.setStreamVolume(AudioManager.STREAM_MUSIC, prev, 0);
-                }
-                publishDeviceStates(true);
-            } catch (Exception e) { Log.w(TAG, "volume mute failed: " + e); }
+        } else if (topic.endsWith("/volume/system/set")) {
+            try { int pct = Integer.parseInt(pl); setVolumePct(AudioManager.STREAM_SYSTEM, pct); publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "system volume set failed: " + e); }
+        } else if (topic.endsWith("/volume/notification/set")) {
+            try { int pct = Integer.parseInt(pl); setVolumePct(AudioManager.STREAM_NOTIFICATION, pct); publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "notification volume set failed: " + e); }
+        } else if (topic.endsWith("/volume/alarm/set")) {
+            try { int pct = Integer.parseInt(pl); setVolumePct(AudioManager.STREAM_ALARM, pct); publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "alarm volume set failed: " + e); }
+        } else if (topic.endsWith("/volume/ring/set")) {
+            try { int pct = Integer.parseInt(pl); setVolumePct(AudioManager.STREAM_RING, pct); publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "ring volume set failed: " + e); }
+        } else if (topic.endsWith("/volume/voice/set")) {
+            try { int pct = Integer.parseInt(pl); setVolumePct(AudioManager.STREAM_VOICE_CALL, pct); publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "voice volume set failed: " + e); }
         } else if (topic.endsWith("/rotation/set")) {
             try {
                 int deg = Integer.parseInt(pl);
@@ -432,10 +460,6 @@ public class ButtonService extends Service {
             runSu("reboot");
         } else if (topic.endsWith("/proc/mute/set")) {
             if (writeProc("/proc/vendor/mute_manual", pl)) mqtt.procState("mute", pl); else publishDeviceStates(true);
-        } else if (topic.endsWith("/proc/aux/set")) {
-            if (writeProc("/proc/vendor/aux_mode", pl)) mqtt.procState("aux", pl); else publishDeviceStates(true);
-        } else if (topic.endsWith("/proc/horn/set")) {
-            if (writeProc("/proc/vendor/horn_mode", pl)) mqtt.procState("horn", pl); else publishDeviceStates(true);
         }
     }
     @Override public void onDestroy() {
