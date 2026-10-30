@@ -136,13 +136,21 @@ follows the system rotation: on a vertically mounted panel, set
 — the panel has no accelerometer, so sensor auto-rotate cannot work,
 but the fixed system rotation persists across reboots.
 
-## Known open items (Oct 29, 2026)
+## Known open items (Oct 30, 2026)
 
-- Boot autostart did NOT fire on the first reboot test: no service or
-  daemon log at 4 min uptime, though the system BOOT_COMPLETED broadcast
-  finished, and a manual BOOT_COMPLETED broadcast started the service
-  immediately. `BootReceiver` now logs on receipt, so the next reboot
-  test will show whether delivery or the service start is at fault.
+- Boot autostart still does NOT fire, after three reboot tests. v4.1
+  broadened the receiver (BOOT_COMPLETED + QUICKBOOT_POWERON +
+  LOCKED_BOOT_COMPLETED, receiver directBootAware, LOCKED_BOOT_COMPLETED
+  logged only because the service reads credential-encrypted prefs that
+  are unavailable before unlock) and the panel was given a battery
+  optimization exemption (deviceidle whitelist) plus an ACTIVE standby
+  bucket, with the receiver explicitly re-enabled. On the Oct 30 reboot
+  test the receiver still never logged, and the daemon was absent from
+  the full broadcast dump, even though the whitelist and bucket survived
+  the reboot. Conclusion: BOOT_COMPLETED delivery is broken for
+  third-party apps on this vendor ROM; the next step is a different
+  mechanism (Kiosk plugin, JobScheduler, or external watchdog), not
+  more BOOT_COMPLETED tweaks.
 - Wake screen via su failed on first live test (`exit=1` from the app
   uid, while the same command works from adb shell as root). The service
   now logs su's output as well as its exit code, to tell a su denial
