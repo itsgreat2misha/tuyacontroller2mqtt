@@ -56,7 +56,14 @@ jobs:
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             mkdir -p out
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > out/debug.keystore
+            # --ignore-garbage: GNU base64 is strict and fails the whole
+            # step on a single stray character. A trailing "%" is easy
+            # to copy by accident from a zsh prompt (zsh prints % when
+            # output has no trailing newline), and whitespace/newlines
+            # are harmless — ignore them instead of failing the build.
+            # This was the run 111523611215 failure: "base64: invalid input".
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d --ignore-garbage > out/debug.keystore
+            test -s out/debug.keystore || { echo "Keystore restore produced an empty file"; exit 1; }
             echo "Using secret keystore for signing."
           else
             echo "No keystore secret set; build.sh will generate a debug keystore (fresh-install APK only)."
