@@ -36,11 +36,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: 30
-          build-tools: 30.0.3
+      # NOTE: do NOT use android-actions/setup-android@v3 here. Its v3
+      # inputs are only cmdline-tools-version, accept-android-sdk-licenses,
+      # log-accepted-android-sdk-licenses and packages — api-level and
+      # build-tools are silently ignored, and its default packages are
+      # "tools platform-tools", where the obsolete "tools" package no
+      # longer exists, so sdkmanager fails with exit 1 before build.sh
+      # ever runs (failed run 111520108921, Oct 30 2026). GitHub's
+      # ubuntu runners already ship cmdline-tools/latest, so install
+      # the exact components build.sh needs directly.
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-30" "build-tools;30.0.3"
 
       - name: Restore signing keystore (if configured)
         env:
