@@ -1,0 +1,12 @@
+plugins { id 'com.android.application' }
+android {
+    compileSdk 30
+    defaultConfig { applicationId "com.misha.f5daemon"; minSdk 21; targetSdk 30; versionCode 1; versionName "1.0" }
+    buildTypes { release { minifyEnabled false } }
+    namespace "com.misha.f5daemon"
+}
+dependencies {
+    // No MQTT library: raw MQTT 3.1.1 client in MqttPublisher.java.
+    // Paho was removed because its ResourceBundle properties are not in a
+    // dex, so MqttClient construction crashed on Android.
+}
