@@ -70,10 +70,18 @@ jobs:
           fi
 
       - name: Build APK
-        env:
-          ANDROID_SDK: ${{ env.ANDROID_HOME }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
         run: |
+          # NOTE: do NOT use ${{ env.ANDROID_HOME }} here. Runner-default
+          # variables like ANDROID_HOME are available to the shell, but
+          # they are NOT in the workflow's env context unless an action
+          # exports them via $GITHUB_ENV (setup-java does this for
+          # JAVA_HOME, nothing does it for ANDROID_HOME), so
+          # ${{ env.ANDROID_HOME }} expands to an empty string and
+          # build.sh fails with "ANDROID_SDK: set ANDROID_SDK", exit 2
+          # (run 111526731234). Read ANDROID_HOME from the shell
+          # instead, falling back to the ubuntu runner's standard path.
+          export ANDROID_SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_SDK=$ANDROID_SDK"
           sh build.sh
           ls -lh out/f5daemon.apk
           sha256sum out/f5daemon.apk > out/f5daemon.apk.sha256
