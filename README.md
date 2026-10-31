@@ -159,6 +159,14 @@ Android Settings or Kiosk update HA, not just changes made from HA.
     it off lets the panel suspend, which stops the daemon until wake.
   - Wake Screen on button press (on by default, buttons only, not
     motion): screen wake lock first, then su on this rooted panel.
+  - Serial Debug (off by default, HA switch "Serial Debug" or app
+    checkbox): logs every ttyAS2 byte to logcat only, plus any
+    7-byte frame dropped for a bad end byte, so a missing motion
+    frame can be traced to parser vs input loss. It auto-switches
+    off after 10 minutes or 5000 bytes, whichever comes first, and
+    publishes OFF back to HA. Logcat is a rotating ring buffer and
+    no file is ever written, so it cannot fill panel storage or
+    log indefinitely.
     su syntax on this ROM is `su 0 <command...>` — NOT `su -c ...`.
     The old `su -c input keyevent 224` failed with exit 1 for that
     reason alone; the app UID can escalate silently via `su 0 ...`

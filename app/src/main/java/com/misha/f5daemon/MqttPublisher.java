@@ -138,9 +138,10 @@ public class MqttPublisher {
         sendPacket(pkt.toByteArray());
     }
     public synchronized void publishAvailability(String v) throws IOException { doPublish(root + "/availability", v, true); }
-    public synchronized void publishOptionStates(boolean wakelock, boolean wakescreen) throws IOException {
+    public synchronized void publishOptionStates(boolean wakelock, boolean wakescreen, boolean serialDebug) throws IOException {
         doPublish(root + "/wakelock/state", wakelock ? "ON" : "OFF", true);
         doPublish(root + "/wakescreen/state", wakescreen ? "ON" : "OFF", true);
+        doPublish(root + "/serial_debug/state", serialDebug ? "ON" : "OFF", true);
     }
     public synchronized void publishDiscovery() throws IOException {
         // Remove old f5-* entities (v1 and v2) so they do not linger.
@@ -208,6 +209,8 @@ public class MqttPublisher {
         doPublish("homeassistant/switch/" + slug + "_wakelock/config", wcfg, true);
         String scfg = "{\"name\":\"Wake Screen with Button\",\"unique_id\":\"" + slug + "_wakescreen\",\"state_topic\":\"" + root + "/wakescreen/state\",\"command_topic\":\"" + root + "/wakescreen/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
         doPublish("homeassistant/switch/" + slug + "_wakescreen/config", scfg, true);
+        String dcfg = "{\"name\":\"Serial Debug\",\"unique_id\":\"" + slug + "_serial_debug\",\"state_topic\":\"" + root + "/serial_debug/state\",\"command_topic\":\"" + root + "/serial_debug/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_serial_debug/config", dcfg, true);
         Log.i(TAG, "mqtt discovery published, device=" + deviceName);
     }
     public synchronized void buttonPress(int button) { try { publishRaw(root + "/button/" + button, "{\"event_type\":\"press\"}", false); } catch (Exception e) { Log.w(TAG, "mqtt press failed: " + e, e); } }

@@ -82,6 +82,35 @@ public class ButtonService extends Service {
     }
     public static boolean wakelockEnabled(SharedPreferences p) { return p.getBoolean("wakelock_enabled", true); }
     public static boolean wakescreenEnabled(SharedPreferences p) { return p.getBoolean("wakescreen_enabled", true); }
+    public static boolean serialDebugEnabled(SharedPreferences p) { return p.getBoolean("serial_debug_enabled", false); }
+    // Serial debug (Oct 31, 2026): opt-in byte-level logging of ttyAS2,
+    // toggleable from HA (switch "Serial Debug") or the app settings page.
+    // Default OFF. It logs to logcat ONLY, never to a file, so it cannot
+    // fill panel storage -- logcat is a rotating ring buffer. It also
+    // cannot run indefinitely: it auto-switches OFF after 10 minutes or
+    // 5000 bytes, whichever comes first, and publishes OFF back to HA,
+    // so leaving the switch on by accident does not spam logcat forever.
+    private volatile boolean serialDebug = false;
+    private volatile long serialDebugStartMs = 0;
+    private volatile int serialDebugBytes = 0;
+    private static final long SERIAL_DEBUG_MAX_MS = 10L * 60L * 1000L;
+    private static final int SERIAL_DEBUG_MAX_BYTES = 5000;
+    private void setSerialDebug(boolean on) {
+        SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+        SharedPreferences.Editor ed = p.edit(); ed.putBoolean("serial_debug_enabled", on); ed.apply();
+        serialDebug = on; serialDebugStartMs = on ? System.currentTimeMillis() : 0; serialDebugBytes = 0;
+        Log.i(TAG, "serial debug " + (on ? "ON (auto-off in 10 min / 5000 bytes)" : "OFF"));
+        try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), on); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+    }
+    private boolean serialDebugActive() {
+        if (!serialDebug) return false;
+        if (System.currentTimeMillis() - serialDebugStartMs > SERIAL_DEBUG_MAX_MS || serialDebugBytes >= SERIAL_DEBUG_MAX_BYTES) {
+            Log.i(TAG, "serial debug auto-off: time/byte cap reached");
+            setSerialDebug(false);
+            return false;
+        }
+        return true;
+    }
     private void enforceDesiredRotation() {
         try {
             SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
@@ -123,6 +152,10 @@ public class ButtonService extends Service {
             .setSmallIcon(android.R.drawable.ic_dialog_info).build();
         startForeground(1, n);
         applyWakelock();
+        // If serial debug was left on, its 10-minute timer restarts here,
+        // so a service restart cannot leave byte logging on indefinitely.
+        serialDebug = serialDebugEnabled(getSharedPreferences("f5", MODE_PRIVATE));
+        serialDebugStartMs = serialDebug ? System.currentTimeMillis() : 0; serialDebugBytes = 0;
         // Startup rotation check (Oct 30, 2026): user_rotation does NOT
         // survive a reboot on this panel, and the Kiosk Autostart plugin
         // rotation commands are manual config that was once lost. The
@@ -155,7 +188,7 @@ public class ButtonService extends Service {
         int port = 1883;
         try { port = Integer.parseInt(p.getString("port", "1883")); } catch (Exception ignored) {}
         mqtt.connect(host, port, p.getString("user", ""), PasswordStore.getPassword(p), deviceName(this, p));
-        mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p));
+        mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p));
         // Sync relay states immediately, and publish current device states
         // (brightness/volume/screen/rotation/proc/nightlight) so HA does
         // not wait for a physical event or a poll tick.
@@ -267,9 +300,21 @@ public class ButtonService extends Service {
             byte[] frame = new byte[7]; int pos = 0;
             while (running) {
                 int b = serialIn.read(); if (b < 0) break;
+                if (serialDebugActive()) {
+                    serialDebugBytes++;
+                    Log.i(TAG, "serial byte: " + String.format("%02x", b) + " pos=" + pos);
+                }
                 if (pos == 0 && b != 0xfc) continue;
                 frame[pos++] = (byte) b;
-                if (pos == 7) { pos = 0; if (frame[6] == (byte) 0xfe) handleFrame(frame); }
+                if (pos == 7) {
+                    pos = 0;
+                    if (frame[6] == (byte) 0xfe) handleFrame(frame);
+                    else if (serialDebug) {
+                        StringBuilder sb = new StringBuilder();
+                        for (byte fb : frame) sb.append(String.format("%02x ", fb));
+                        Log.i(TAG, "serial frame bad end (dropped, no fe): " + sb.toString().trim());
+                    }
+                }
             }
         } catch (Exception e) { if (running) Log.e(TAG, "serial read failed", e); }
     }
@@ -415,7 +460,7 @@ public class ButtonService extends Service {
                 // within one poll tick instead of waiting for a change.
                 for (int rr = 1; rr <= 3; rr++) if (lastRelayState[rr] >= 0) mqtt.relay(rr, lastRelayState[rr] == 1);
                 if (lastMotionState >= 0) mqtt.motion(lastMotionState == 1);
-                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p));
+                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p));
                 mqtt.volumeStream("system", volumePctFor(AudioManager.STREAM_SYSTEM));
                 mqtt.volumeStream("notification", volumePctFor(AudioManager.STREAM_NOTIFICATION));
                 mqtt.volumeStream("alarm", volumePctFor(AudioManager.STREAM_ALARM));
@@ -436,14 +481,16 @@ public class ButtonService extends Service {
         String pl = payload == null ? "" : payload.trim();
         SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
         Log.i(TAG, "mqtt command " + topic + " -> " + pl);
-        if (topic.endsWith("/wakelock/set")) {
+        if (topic.endsWith("/serial_debug/set")) {
+            setSerialDebug("ON".equalsIgnoreCase(pl));
+        } else if (topic.endsWith("/wakelock/set")) {
             boolean on = "ON".equalsIgnoreCase(pl);
             SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakelock_enabled", on); ed.apply(); applyWakelock();
-            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
         } else if (topic.endsWith("/wakescreen/set")) {
             boolean on = "ON".equalsIgnoreCase(pl);
             SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakescreen_enabled", on); ed.apply();
-            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
         } else if (topic.matches(".*/relay/[0-9]+/set")) {
             String[] parts = topic.split("/");
             int relay = Integer.parseInt(parts[parts.length - 2]);
