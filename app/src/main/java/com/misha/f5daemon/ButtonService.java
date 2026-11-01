@@ -82,34 +82,82 @@ public class ButtonService extends Service {
     }
     public static boolean wakelockEnabled(SharedPreferences p) { return p.getBoolean("wakelock_enabled", true); }
     public static boolean wakescreenEnabled(SharedPreferences p) { return p.getBoolean("wakescreen_enabled", true); }
-    public static boolean serialDebugEnabled(SharedPreferences p) { return p.getBoolean("serial_debug_enabled", false); }
-    // Serial debug (Oct 31, 2026): opt-in byte-level logging of ttyAS2,
-    // toggleable from HA (switch "Serial Debug") or the app settings page.
-    // Default OFF. It logs to logcat ONLY, never to a file, so it cannot
-    // fill panel storage -- logcat is a rotating ring buffer. It also
-    // cannot run indefinitely: it auto-switches OFF after 10 minutes or
-    // 5000 bytes, whichever comes first, and publishes OFF back to HA,
-    // so leaving the switch on by accident does not spam logcat forever.
-    private volatile boolean serialDebug = false;
-    private volatile long serialDebugStartMs = 0;
-    private volatile int serialDebugBytes = 0;
-    private static final long SERIAL_DEBUG_MAX_MS = 10L * 60L * 1000L;
-    private static final int SERIAL_DEBUG_MAX_BYTES = 5000;
-    private void setSerialDebug(boolean on) {
+    // Global Debug mode (Nov 1, 2026, replaces the Oct 31 Serial Debug
+    // switch): one toggle, HA switch "Debug" or app checkbox, default
+    // OFF, no auto-off. When on, DiagLogger writes rotating files
+    // (serial/metrics/events, 30 MB total hard cap, see DiagLogger),
+    // so it is safe to leave on indefinitely to catch intermittent
+    // faults like the Nov 1 morning motion miss. Migration: a panel
+    // whose old serial_debug_enabled pref was on, with no debug_enabled
+    // pref yet, starts with Debug on (applied once in onStartCommand).
+    public static boolean debugEnabled(SharedPreferences p) {
+        if (p.contains("debug_enabled")) return p.getBoolean("debug_enabled", false);
+        return p.getBoolean("serial_debug_enabled", false);
+    }
+    // Created in onStartCommand with getFilesDir() (not available at
+    // construction time); all diag-using threads start after that.
+    private DiagLogger diag;
+    private volatile boolean debug = false;
+    private volatile long frameCount = 0;
+    private volatile long droppedFrameCount = 0;
+    private volatile long serialErrorCount = 0;
+    private volatile long lastFrameTimeMs = 0;
+    private volatile long lastMotionFrameTimeMs = 0;
+    private volatile String lastFrameHex = "";
+    private void setDebug(boolean on) {
         SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
-        SharedPreferences.Editor ed = p.edit(); ed.putBoolean("serial_debug_enabled", on); ed.apply();
-        serialDebug = on; serialDebugStartMs = on ? System.currentTimeMillis() : 0; serialDebugBytes = 0;
-        Log.i(TAG, "serial debug " + (on ? "ON (auto-off in 10 min / 5000 bytes)" : "OFF"));
+        SharedPreferences.Editor ed = p.edit(); ed.putBoolean("debug_enabled", on); ed.apply();
+        debug = on; diag.setEnabled(on);
+        Log.i(TAG, "debug " + (on ? "ON (rotating logs, 30 MB cap)" : "OFF"));
+        diag.event("debug " + (on ? "ON" : "OFF"));
         try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), on); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
     }
-    private boolean serialDebugActive() {
-        if (!serialDebug) return false;
-        if (System.currentTimeMillis() - serialDebugStartMs > SERIAL_DEBUG_MAX_MS || serialDebugBytes >= SERIAL_DEBUG_MAX_BYTES) {
-            Log.i(TAG, "serial debug auto-off: time/byte cap reached");
-            setSerialDebug(false);
-            return false;
-        }
-        return true;
+    private static String hex(byte[] f, int len) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < len; i++) { if (i > 0) sb.append(" "); sb.append(String.format("%02x", f[i])); }
+        return sb.toString();
+    }
+    private static String decodeFrame(byte[] f) {
+        if (f[2] == 0x1c) return "motion ON";
+        if (f[2] == 0x0c) return "motion OFF";
+        if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) return "button press id=" + (f[5] & 0xff);
+        if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) return "relay " + (f[5] & 0xff) + " " + (f[4] == 0x01 ? "ON" : "OFF") + " (f3=" + String.format("%02x", f[3]) + ")";
+        if (f[2] == 0x00 && f[3] == 0x00 && f[4] == (byte) 0xaa) return "query response marker";
+        return "unknown f2=" + String.format("%02x", f[2]) + " f3=" + String.format("%02x", f[3]);
+    }
+    private String readFirstLine(String path) {
+        try {
+            BufferedReader r = new BufferedReader(new FileReader(path));
+            String s = r.readLine(); r.close();
+            return s == null ? "" : s.trim();
+        } catch (Exception e) { return ""; }
+    }
+    private String meminfo(String key) {
+        try {
+            BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"));
+            String line; while ((line = r.readLine()) != null) {
+                if (line.startsWith(key)) { r.close(); return line.replaceAll("[^0-9]", ""); }
+            }
+            r.close();
+        } catch (Exception ignored) {}
+        return "";
+    }
+    private String metricsSnapshot(String why) {
+        long now = System.currentTimeMillis();
+        long motionAge = lastMotionFrameTimeMs > 0 ? (now - lastMotionFrameTimeMs) / 1000 : -1;
+        long frameAge = lastFrameTimeMs > 0 ? (now - lastFrameTimeMs) / 1000 : -1;
+        String load = readFirstLine("/proc/loadavg");
+        String uptime = readFirstLine("/proc/uptime");
+        String t0 = readFirstLine("/sys/class/thermal/thermal_zone0/temp");
+        String t1 = readFirstLine("/sys/class/thermal/thermal_zone1/temp");
+        boolean scr = false;
+        try { scr = ((PowerManager) getSystemService(POWER_SERVICE)).isInteractive(); } catch (Exception ignored) {}
+        return "why=" + why + " load=" + load + " memTotalKB=" + meminfo("MemTotal:") + " memFreeKB=" + meminfo("MemFree:")
+            + " memAvailKB=" + meminfo("MemAvailable:") + " uptime_s=" + (uptime.isEmpty() ? "" : uptime.split(" ")[0])
+            + " temp0=" + t0 + " temp1=" + t1 + " screen=" + scr + " mqtt=" + mqtt.connected()
+            + " motion=" + lastMotionState + " motionAge_s=" + motionAge + " lastFrameAge_s=" + frameAge
+            + " frames=" + frameCount + " dropped=" + droppedFrameCount + " serialErrors=" + serialErrorCount
+            + " lastFrame=" + lastFrameHex;
     }
     private void enforceDesiredRotation() {
         try {
@@ -152,10 +200,16 @@ public class ButtonService extends Service {
             .setSmallIcon(android.R.drawable.ic_dialog_info).build();
         startForeground(1, n);
         applyWakelock();
-        // If serial debug was left on, its 10-minute timer restarts here,
-        // so a service restart cannot leave byte logging on indefinitely.
-        serialDebug = serialDebugEnabled(getSharedPreferences("f5", MODE_PRIVATE));
-        serialDebugStartMs = serialDebug ? System.currentTimeMillis() : 0; serialDebugBytes = 0;
+        if (diag == null) diag = new DiagLogger(getFilesDir());
+        // One-time migration from the old Serial Debug pref: if the
+        // new debug_enabled pref does not exist yet, persist the old
+        // value under the new key so the toggle state survives.
+        SharedPreferences prefs = getSharedPreferences("f5", MODE_PRIVATE);
+        if (!prefs.contains("debug_enabled") && prefs.contains("serial_debug_enabled")) {
+            prefs.edit().putBoolean("debug_enabled", prefs.getBoolean("serial_debug_enabled", false)).apply();
+        }
+        debug = debugEnabled(prefs); diag.setEnabled(debug);
+        diag.event("service started debug=" + debug); diag.metrics(metricsSnapshot("service-start"));
         // Startup rotation check (Oct 30, 2026): user_rotation does NOT
         // survive a reboot on this panel, and the Kiosk Autostart plugin
         // rotation commands are manual config that was once lost. The
@@ -188,7 +242,8 @@ public class ButtonService extends Service {
         int port = 1883;
         try { port = Integer.parseInt(p.getString("port", "1883")); } catch (Exception ignored) {}
         mqtt.connect(host, port, p.getString("user", ""), PasswordStore.getPassword(p), deviceName(this, p));
-        mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p));
+        diag.event("mqtt connected to " + host + ":" + port); diag.metrics(metricsSnapshot("mqtt-connect"));
+        mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p));
         // Sync relay states immediately, and publish current device states
         // (brightness/volume/screen/rotation/proc/nightlight) so HA does
         // not wait for a physical event or a poll tick.
@@ -200,7 +255,7 @@ public class ButtonService extends Service {
             try {
                 if (mqtt.connected()) mqtt.ping();
                 else connectNow();
-            } catch (Exception e) { Log.w(TAG, "mqtt connect failed, will retry: " + e); }
+            } catch (Exception e) { Log.w(TAG, "mqtt connect failed, will retry: " + e); diag.event("mqtt connect failed, will retry: " + e); }
             try { Thread.sleep(30000); } catch (InterruptedException ignored) { break; }
         }
     }
@@ -255,10 +310,16 @@ public class ButtonService extends Service {
                 if (serialOut == null) { serialOut = new FileOutputStream("/dev/ttyAS2"); try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception ignored) {} }
                 serialOut.write(frame); serialOut.flush();
                 try { Thread.sleep(200); } catch (InterruptedException ignored) {}
-                StringBuilder sb = new StringBuilder();
-                for (byte b : frame) sb.append(String.format("%02x ", b));
-                Log.i(TAG, "serial write: " + sb.toString().trim());
-            } catch (Exception e) { Log.w(TAG, "serial write failed: " + e); }
+                String outHex = hex(frame, frame.length);
+                Log.i(TAG, "serial write: " + outHex);
+                diag.serial("OUT " + outHex + " " + decodeFrame(frame));
+            } catch (Exception e) {
+                // Drop the broken stream so the next write reopens
+                // ttyAS2 instead of failing forever on a dead handle.
+                Log.w(TAG, "serial write failed: " + e);
+                try { if (serialOut != null) serialOut.close(); } catch (Exception ignored) {}
+                serialOut = null;
+            }
         }
     }
     private void sendQuery() {
@@ -293,38 +354,96 @@ public class ButtonService extends Service {
         SharedPreferences.Editor ed = p.edit(); ed.putBoolean("nightlight_on", on); ed.putInt("nightlight_brightness", bright); ed.apply();
         try { mqtt.nightLight(on, bright); } catch (Exception e) { Log.w(TAG, "nightlight publish failed: " + e); }
     }
+    // Frame-loss audit (Nov 1, 2026) -- three conditions found, all
+    // fixed here:
+    // 1. PERMANENT LOSS (worst): the old readLoop caught a serial
+    //    exception / EOF, logged it, and the thread simply ended.
+    //    The service stayed alive, MQTT stayed connected, and pollLoop
+    //    kept republishing the stale lastMotionState every 5 s, so HA
+    //    showed a live but frozen motion entity -- exactly the Nov 1
+    //    morning symptom (buttons lit locally, HA motion stuck
+    //    cleared, screensaver stuck). Now the loop reopens ttyAS2
+    //    with backoff (1 s doubling to 30 s, reset on a good frame)
+    //    and logs every reopen to events.log, so a dead reader is
+    //    visible in the diagnostics instead of silent.
+    // 2. ONE-FRAME LOSS ON CORRUPTION: the old parser stored an
+    //    unexpected 0xfc mid-frame as data, so the corrupted frame
+    //    AND the good frame after it were both lost before resync.
+    //    Now a 0xfc at pos > 0 discards the partial frame and starts
+    //    a new one immediately. No known frame has 0xfc as a data
+    //    byte (data is 00/01/a0-a4/aa/1c/0c/1d/brightness), so this
+    //    cannot split a valid frame. A byte lost inside a frame
+    //    still costs that one frame (unavoidable: its end byte no
+    //    longer lines up), but the next frame resyncs, as before.
+    // 3. PER-BYTE LOGCAT SPAM: the old Serial Debug logged every
+    //    byte to logcat, which is slow enough to contribute to tty
+    //    buffer pressure during bursts. Now frames (not bytes) go
+    //    to serial.log, and dropped partials/bad frames are logged
+    //    there too, with counters in every metrics snapshot, so
+    //    the drop rate is visible long-term instead of in a 10-min
+    //    logcat window.
+    // Not changed, by design: handleFrame sets lastMotionState
+    // BEFORE publishing, so a single failed MQTT publish (QoS 0,
+    // caught and logged) heals within one 5 s poll tick; and
+    // handleFrame runs synchronously on the read thread, so a slow
+    // MQTT reconnect can stall serial reading for seconds -- the
+    // 4096-byte tty buffer holds ~585 frames, far above the
+    // event-driven rate here, so this is a theoretical, not a
+    // practical, loss vector, and decoupling it would risk the
+    // 350 ms press-batching timing.
     private void readLoop() {
-        try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception e) { Log.w(TAG, "stty failed", e); }
-        try {
-            serialIn = new FileInputStream("/dev/ttyAS2");
-            byte[] frame = new byte[7]; int pos = 0;
-            while (running) {
-                int b = serialIn.read(); if (b < 0) break;
-                if (serialDebugActive()) {
-                    serialDebugBytes++;
-                    Log.i(TAG, "serial byte: " + String.format("%02x", b) + " pos=" + pos);
-                }
-                if (pos == 0 && b != 0xfc) continue;
-                frame[pos++] = (byte) b;
-                if (pos == 7) {
-                    pos = 0;
-                    if (frame[6] == (byte) 0xfe) handleFrame(frame);
-                    else if (serialDebug) {
-                        StringBuilder sb = new StringBuilder();
-                        for (byte fb : frame) sb.append(String.format("%02x ", fb));
-                        Log.i(TAG, "serial frame bad end (dropped, no fe): " + sb.toString().trim());
+        long backoffMs = 1000;
+        while (running) {
+            try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception e) { Log.w(TAG, "stty failed", e); }
+            try {
+                serialIn = new FileInputStream("/dev/ttyAS2");
+                byte[] frame = new byte[7]; int pos = 0;
+                while (running) {
+                    int b = serialIn.read(); if (b < 0) throw new java.io.EOFException("ttyAS2 EOF");
+                    if (pos > 0 && b == 0xfc) {
+                        droppedFrameCount++;
+                        String partial = hex(frame, pos);
+                        Log.i(TAG, "serial frame partial discarded on resync: " + partial);
+                        diag.serial("dropped partial frame: " + partial + " (resync on 0xfc)");
+                        frame[0] = (byte) b; pos = 1; continue;
+                    }
+                    if (pos == 0 && b != 0xfc) continue;
+                    frame[pos++] = (byte) b;
+                    if (pos == 7) {
+                        pos = 0;
+                        if (frame[6] == (byte) 0xfe) {
+                            byte[] copy = java.util.Arrays.copyOf(frame, 7);
+                            frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, 7);
+                            backoffMs = 1000;
+                            handleFrame(copy);
+                        } else {
+                            droppedFrameCount++;
+                            String bad = hex(frame, 7);
+                            Log.i(TAG, "serial frame bad end (dropped, no fe): " + bad);
+                            diag.serial("dropped bad frame: " + bad);
+                        }
                     }
                 }
+            } catch (Exception e) {
+                if (!running) break;
+                serialErrorCount++;
+                Log.e(TAG, "serial read failed, reopening in " + backoffMs + " ms", e);
+                diag.event("serial read error: " + e + " reopening in " + backoffMs + " ms");
+                diag.metrics(metricsSnapshot("serial-reopen"));
+                try { if (serialIn != null) serialIn.close(); } catch (Exception ignored) {}
+                serialIn = null;
+                try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) { break; }
+                if (backoffMs < 30000) backoffMs *= 2;
             }
-        } catch (Exception e) { if (running) Log.e(TAG, "serial read failed", e); }
+        }
     }
     private void handleFrame(byte[] f) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : f) sb.append(String.format("%02x ", b));
-        Log.i(TAG, "frame: " + sb.toString().trim());
+        String frameHex = hex(f, 7);
+        Log.i(TAG, "frame: " + frameHex);
+        diag.serial("IN " + frameHex + " " + decodeFrame(f));
         try {
-            if (f[2] == 0x1c) { lastMotionState = 1; mqtt.motion(true); }
-            else if (f[2] == 0x0c) { lastMotionState = 0; mqtt.motion(false); }
+            if (f[2] == 0x1c) { lastMotionState = 1; lastMotionFrameTimeMs = System.currentTimeMillis(); mqtt.motion(true); diag.metrics(metricsSnapshot("motion-on")); }
+            else if (f[2] == 0x0c) { lastMotionState = 0; lastMotionFrameTimeMs = System.currentTimeMillis(); mqtt.motion(false); diag.metrics(metricsSnapshot("motion-off")); }
             else if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 mqtt.buttonPress(f[5] & 0xff);
@@ -391,7 +510,12 @@ public class ButtonService extends Service {
                     }
                 }
             }
-        } catch (Exception e) { Log.w(TAG, "mqtt publish failed", e); }
+        } catch (Exception e) {
+            // lastMotionState was already set above, so a single
+            // failed QoS 0 publish heals on the next 5 s poll tick.
+            Log.w(TAG, "mqtt publish failed", e);
+            diag.event("mqtt publish failed for frame " + frameHex + ": " + e);
+        }
     }
     // ---- device state: get / set / poll ----
     private int brightnessPct() {
@@ -460,7 +584,7 @@ public class ButtonService extends Service {
                 // within one poll tick instead of waiting for a change.
                 for (int rr = 1; rr <= 3; rr++) if (lastRelayState[rr] >= 0) mqtt.relay(rr, lastRelayState[rr] == 1);
                 if (lastMotionState >= 0) mqtt.motion(lastMotionState == 1);
-                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p));
+                mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p));
                 mqtt.volumeStream("system", volumePctFor(AudioManager.STREAM_SYSTEM));
                 mqtt.volumeStream("notification", volumePctFor(AudioManager.STREAM_NOTIFICATION));
                 mqtt.volumeStream("alarm", volumePctFor(AudioManager.STREAM_ALARM));
@@ -470,8 +594,12 @@ public class ButtonService extends Service {
         } catch (Exception e) { Log.w(TAG, "device state publish failed: " + e); }
     }
     private void pollLoop() {
+        int tick = 0;
         while (pollRunning) {
             try { if (mqtt.connected()) publishDeviceStates(true); } catch (Exception e) { Log.w(TAG, "poll failed: " + e); }
+            tick++;
+            // Metrics every 30 s: every 6th 5 s tick, no new thread.
+            if (tick % 6 == 0) diag.metrics(metricsSnapshot("periodic-30s"));
             try { Thread.sleep(5000); } catch (InterruptedException ignored) { break; }
         }
     }
@@ -481,16 +609,16 @@ public class ButtonService extends Service {
         String pl = payload == null ? "" : payload.trim();
         SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
         Log.i(TAG, "mqtt command " + topic + " -> " + pl);
-        if (topic.endsWith("/serial_debug/set")) {
-            setSerialDebug("ON".equalsIgnoreCase(pl));
+        if (topic.endsWith("/debug/set")) {
+            setDebug("ON".equalsIgnoreCase(pl));
         } else if (topic.endsWith("/wakelock/set")) {
             boolean on = "ON".equalsIgnoreCase(pl);
             SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakelock_enabled", on); ed.apply(); applyWakelock();
-            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
         } else if (topic.endsWith("/wakescreen/set")) {
             boolean on = "ON".equalsIgnoreCase(pl);
             SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakescreen_enabled", on); ed.apply();
-            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), serialDebugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+            try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
         } else if (topic.matches(".*/relay/[0-9]+/set")) {
             String[] parts = topic.split("/");
             int relay = Integer.parseInt(parts[parts.length - 2]);
@@ -547,6 +675,7 @@ public class ButtonService extends Service {
         }
     }
     @Override public void onDestroy() {
+        if (diag != null) diag.event("service stopped");
         running = false; reconnectRunning = false; pollRunning = false;
         try { if (serialIn != null) serialIn.close(); } catch (Exception ignored) {}
         try { if (serialOut != null) serialOut.close(); } catch (Exception ignored) {}

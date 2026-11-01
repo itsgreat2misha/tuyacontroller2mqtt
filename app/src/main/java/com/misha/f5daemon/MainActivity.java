@@ -40,8 +40,8 @@ public class MainActivity extends Activity {
         wakelock.setChecked(ButtonService.wakelockEnabled(p));
         CheckBox wakescreen = new CheckBox(this); wakescreen.setText("Wake screen on button press (not on motion)");
         wakescreen.setChecked(ButtonService.wakescreenEnabled(p));
-        CheckBox serialDebug = new CheckBox(this); serialDebug.setText("Serial debug: log every ttyAS2 byte (auto-off after 10 min / 5000 bytes, logcat only)");
-        serialDebug.setChecked(ButtonService.serialDebugEnabled(p));
+        CheckBox debugBox = new CheckBox(this); debugBox.setText("Debug: rotating log files (serial traces, metrics, events) — safe to leave on, capped at 30 MB total");
+        debugBox.setChecked(ButtonService.debugEnabled(p));
         Button save = new Button(this); save.setText("Save and start daemon");
         save.setOnClickListener(v -> {
             int portNum;
@@ -55,7 +55,7 @@ public class MainActivity extends Activity {
                 ed.putString("user", user.getText().toString().trim());
                 ed.putBoolean("wakelock_enabled", wakelock.isChecked());
                 ed.putBoolean("wakescreen_enabled", wakescreen.isChecked());
-                ed.putBoolean("serial_debug_enabled", serialDebug.isChecked());
+                ed.putBoolean("debug_enabled", debugBox.isChecked());
                 PasswordStore.setPassword(ed, pass.getText().toString());
                 ed.apply();
             } catch (Exception e) {
@@ -76,7 +76,7 @@ public class MainActivity extends Activity {
         TextView note = new TextView(this);
         note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first. Turning off the wake lock lets the panel suspend, which stops serial reading until it wakes. Screen brightness and rotation need Write Settings (button above, granted once in Android Settings); without it, HA commands for those two are refused and HA reverts to the actual value. Screen on/off and reboot use su on this rooted panel (syntax: su 0 <command>); volume uses AudioManager; /proc audio switches write directly to /proc/vendor.");
         root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show);
-        root.addView(wakelock); root.addView(wakescreen); root.addView(serialDebug); root.addView(save); root.addView(grantWrite); root.addView(note);
+        root.addView(wakelock); root.addView(wakescreen); root.addView(debugBox); root.addView(save); root.addView(grantWrite); root.addView(note);
         scroll.addView(root); setContentView(scroll);
     }
     private EditText field(String value, String hint, int inputType, int ime) {

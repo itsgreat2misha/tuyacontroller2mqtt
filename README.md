@@ -159,14 +159,23 @@ Android Settings or Kiosk update HA, not just changes made from HA.
     it off lets the panel suspend, which stops the daemon until wake.
   - Wake Screen on button press (on by default, buttons only, not
     motion): screen wake lock first, then su on this rooted panel.
-  - Serial Debug (off by default, HA switch "Serial Debug" or app
-    checkbox): logs every ttyAS2 byte to logcat only, plus any
-    7-byte frame dropped for a bad end byte, so a missing motion
-    frame can be traced to parser vs input loss. It auto-switches
-    off after 10 minutes or 5000 bytes, whichever comes first, and
-    publishes OFF back to HA. Logcat is a rotating ring buffer and
-    no file is ever written, so it cannot fill panel storage or
-    log indefinitely.
+  - Debug (off by default, HA switch "Debug" or app checkbox): one
+    global toggle, no auto-off, safe to leave on indefinitely.
+    Writes three rotating log files in the daemon's private
+    storage (`/data/data/com.misha.f5daemon/files/diag/`, pull
+    with adb): `serial.log` (every frame in/out, hex + decoded,
+    plus dropped/bad frames), `metrics.log` (a snapshot every
+    30 s plus event-triggered snapshots on motion frames, MQTT
+    connect/disconnect and serial reopen), and `events.log`
+    (lifecycle and errors). Hard total cap 30 MB (serial 5 MB,
+    metrics 20 MB, events 5 MB, oldest files deleted on rotation),
+    plus a pause if /data free space drops below 100 MB, so it
+    cannot eat panel storage. Frame-loss fixes in the same
+    version: the serial reader reopens ttyAS2 with backoff
+    instead of dying silently on an error (a dead reader used to
+    leave HA showing a live but frozen motion entity), and a
+    stray 0xfc mid-frame resyncs immediately instead of losing
+    the following good frame.
     su syntax on this ROM is `su 0 <command...>` — NOT `su -c ...`.
     The old `su -c input keyevent 224` failed with exit 1 for that
     reason alone; the app UID can escalate silently via `su 0 ...`
