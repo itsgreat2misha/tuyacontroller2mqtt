@@ -29,12 +29,16 @@ import java.io.*;
 //   no status frame back (optimistic state in prefs).
 // Press vs virtual discernment (Oct 30, 2026 test): a physical press is
 // an immediate unsolicited single frame; a virtual set produces no frame,
-// only a later query batch. So: frames arriving shortly after a query
-// (or matching a just-sent set) are state only; all other relay frames
-// are physical presses and publish BOTH state and a press event. HA
-// toggle automations must trigger on the press event, not on state,
-// otherwise a lights->relay sync (external light change -> relay switch)
-// would re-trigger the toggle and loop.
+// only a later query batch. HA toggle automations must trigger on the
+// press event, not on state, otherwise a lights->relay sync (external
+// light change -> relay switch) would re-trigger the toggle and loop.
+// Discernment is the 350 ms batch + relay-4 marker in handleFrameArrival:
+// a query batch always contains the a4 marker frame, so a batch with a4
+// in it publishes no presses; any other batch is real presses. An earlier
+// version ALSO suppressed frames within 5 s of a query or a just-sent
+// set; that was removed Nov 2, 2026 after it broke momentary mode --
+// the snap-back's own follow-up query made every second press inside
+// 5 s get eaten as "state only" (alternating presses failed live).
 // Per-relay mode (Nov 2, 2026): each relay 1-3 is independently in
 // "relay" mode (default: HA switch exposed, HA may set it) or
 // "momentary" mode (HA switch retracted, only the press event
@@ -632,12 +636,13 @@ public class ButtonService extends Service {
                 boolean on = f[4] == 0x01;
                 if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
                 enqueuePublish(new PublishAction(PublishAction.RELAY, relay, on));
-                boolean queryBatch = System.currentTimeMillis() - lastQueryTime < 5000;
-                boolean justSet = System.currentTimeMillis() - lastSetTime < 5000 && relay == lastSetRelay && on == lastSetState;
-                if (queryBatch || justSet) {
-                    // Daemon-initiated query/set: state only, never a press.
-                    return;
-                }
+                // Discernment is ONLY the batch + relay-4 marker below
+                // (see header): a query batch always carries the a4
+                // marker, and a virtual set produces no frame at all.
+                // The former 5 s query/set time windows were removed
+                // Nov 2, 2026 -- the momentary snap-back's follow-up
+                // query swallowed every real press landing within 5 s
+                // of it, so alternating presses failed.
                 // Relay 4 is a query-only channel (no physical button);
                 // it is added to the pending batch below only as a marker
                 // that the batch was a query response, never published
