@@ -32,13 +32,17 @@ import java.io.*;
 // only a later query batch. HA toggle automations must trigger on the
 // press event, not on state, otherwise a lights->relay sync (external
 // light change -> relay switch) would re-trigger the toggle and loop.
-// Discernment is the 350 ms batch + relay-4 marker in handleFrameArrival:
-// a query batch always contains the a4 marker frame, so a batch with a4
-// in it publishes no presses; any other batch is real presses. An earlier
+// Discernment is the candidate window in handleFrameArrival: a relay
+// frame is held 80 ms; a query batch is a single burst terminated by
+// the relay-4 frame, which discards any candidates it produced, while
+// a frame still unclaimed after 80 ms was a real press. An earlier
 // version ALSO suppressed frames within 5 s of a query or a just-sent
 // set; that was removed Nov 2, 2026 after it broke momentary mode --
 // the snap-back's own follow-up query made every second press inside
 // 5 s get eaten as "state only" (alternating presses failed live).
+// The first fix attempt's 350 ms batch window had the same disease in
+// miniature (its tail poisoned presses landing just after a batch);
+// the 80 ms window anchored to the burst itself does not.
 // Per-relay mode (Nov 2, 2026): each relay 1-3 is independently in
 // "relay" mode (default: HA switch exposed, HA may set it) or
 // "momentary" mode (HA switch retracted, only the press event
@@ -614,63 +618,51 @@ public class ButtonService extends Service {
             } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 // Relay 4 is a query-only channel: its frame is
-                // fc 00 00 a4 00 00 fe, i.e. f[5] is 0, NOT 4. The old
-                // code read relay = f[5], so it never saw relay 4 and
-                // the query-batch marker below never fired -- a manual
-                // query (adb cat) then published false press events.
-                // Detect a4 via f[3] and add a marker entry (relay=4).
+                // fc 00 00 a4 00 00 fe, i.e. f[5] is 0, NOT 4 (detect
+                // it via f[3]). The a4 frame TERMINATES a query batch:
+                // the batch's a1-a3 frames arrived in the same burst
+                // just before it and are sitting in the candidate list
+                // below -- discard them, they were state, not presses.
+                // A press arriving after the a4 is a new candidate in
+                // a fresh window and is never poisoned by this batch.
                 if ((f[3] & 0xff) == 0xa4) {
-                    synchronized (pendingPresses) {
-                        pendingPresses.add(new int[]{4, 0});
-                        if (!pressThreadRunning) {
-                            pressThreadRunning = true;
-                            new Thread(() -> {
-                                try { Thread.sleep(350); } catch (InterruptedException ignored) {}
-                                synchronized (pendingPresses) { pendingPresses.clear(); pressThreadRunning = false; }
-                            }).start();
-                        }
-                    }
+                    synchronized (pendingPresses) { pendingPresses.clear(); }
                     return;
                 }
                 int relay = f[5] & 0xff;
                 boolean on = f[4] == 0x01;
                 if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
                 enqueuePublish(new PublishAction(PublishAction.RELAY, relay, on));
-                // Discernment is ONLY the batch + relay-4 marker below
-                // (see header): a query batch always carries the a4
-                // marker, and a virtual set produces no frame at all.
-                // The former 5 s query/set time windows were removed
-                // Nov 2, 2026 -- the momentary snap-back's follow-up
-                // query swallowed every real press landing within 5 s
-                // of it, so alternating presses failed.
-                // Relay 4 is a query-only channel (no physical button);
-                // it is added to the pending batch below only as a marker
-                // that the batch was a query response, never published
-                // as a press itself (see publish filter).
-                // Otherwise, possibly a physical press -- but a query batch
-                // sent by another writer (adb, etc.) looks identical, so
-                // delay the press event 350 ms and batch it: if a relay-4
-                // frame arrives in that window, the whole batch was a query
-                // response and no press is published; otherwise every frame
-                // in the window was a real press and is published in order.
+                // Candidate-press window (80 ms): a relay frame is
+                // either a physical press or one frame of a query
+                // batch. A batch is a single burst (a1-a4 within
+                // ~10 ms) terminated by the a4 frame, which discards
+                // the candidates (see the a4 branch above). So: hold
+                // the frame as a candidate for 80 ms; if no a4 shows
+                // up, it was a real press. The window is anchored to
+                // the burst itself. (The previous design used a
+                // 350 ms window resolved by a thread started at the
+                // batch's FIRST frame; its tail extended past the
+                // batch's end and the a4 marker poisoned real presses
+                // landing in that tail -- with the snap-back's query
+                // after every press, alternating presses failed
+                // systematically, Nov 2, 2026.)
                 synchronized (pendingPresses) {
                     pendingPresses.add(new int[]{relay, on ? 1 : 0});
                     if (!pressThreadRunning) {
                         pressThreadRunning = true;
                         new Thread(() -> {
-                            try { Thread.sleep(350); } catch (InterruptedException ignored) {}
+                            try { Thread.sleep(80); } catch (InterruptedException ignored) {}
                             // Snapshot under the lock, act outside it:
                             // the snap-back below sleeps in setRelay,
                             // and the read thread must not wait on that.
                             java.util.ArrayList<int[]> batch;
-                            boolean hasRelay4 = false;
                             synchronized (pendingPresses) {
                                 batch = new java.util.ArrayList<int[]>(pendingPresses);
-                                for (int[] pr : batch) if (pr[0] == 4) hasRelay4 = true;
                                 pendingPresses.clear();
                                 pressThreadRunning = false;
                             }
-                            if (hasRelay4) return;
+                            if (batch.isEmpty()) return;
                             SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
                             int[] lastPressState = new int[]{-1, -1, -1, -1, -1};
                             for (int[] pr : batch) {
