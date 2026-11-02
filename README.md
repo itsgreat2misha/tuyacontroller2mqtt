@@ -93,7 +93,20 @@ there, motion is confirmed.
 - `event` Relay 1 press, Relay 2 press, Relay 3 press — physical presses
   only (see press vs virtual note above); toggle automations should
   trigger on these, not on relay state
-- `binary_sensor` Motion — `device_class: motion`, retained
+- `select` Relay 1 Mode, Relay 2 Mode, Relay 3 Mode — `relay`
+  (default) or `momentary`, independent per relay, persisted on the
+  panel. In momentary mode the relay's `switch` entity is retracted
+  (only the press event remains): a physical press that turns the
+  relay on is snapped back off by the daemon itself within a second,
+  and relay set commands are ignored. Use it when a button is purely
+  virtual (no load on the relay): every remote relay flip activates
+  the panel's motion state without a motion frame (see below), so
+  state-sync automations silently break panel motion sensing.
+- `binary_sensor` Motion — `device_class: motion`, retained. A
+  physical press of any button also publishes ON (a press is proof of
+  presence, and can land before the sensor's own ON frame); the
+  panel's clear frame ends the episode — clears are presence-governed
+  (sustained while someone is there, ~43 s after they leave)
 - `light` Night Light — side-edge LED bar, brightness 0-100 only, no
   colour (vendor code has no colour API); state is optimistic, the MCU
   sends no status frame for it

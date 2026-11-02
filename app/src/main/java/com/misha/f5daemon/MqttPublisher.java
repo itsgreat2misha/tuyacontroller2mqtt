@@ -23,6 +23,15 @@ public class MqttPublisher {
     private boolean connected = false;
     private CommandListener listener;
     private Thread readerThread;
+    // Per-relay mode (Nov 2, 2026): false = relay mode (HA switch
+    // exposed), true = momentary mode (switch discovery retracted,
+    // only the press event remains). Set by the service from prefs
+    // before connect and on every mode change; publishDiscovery and
+    // publishRelaySwitchDiscovery read it. Relays 1-3 only (index 0
+    // unused; relay 4 is a query-only channel with no switch).
+    private final boolean[] relayMomentary = new boolean[5];
+    public void setRelayMomentary(int relay, boolean momentary) { if (relay >= 1 && relay <= 4) relayMomentary[relay] = momentary; }
+    public boolean relayMomentary(int relay) { return relay >= 1 && relay <= 4 && relayMomentary[relay]; }
     public void setCommandListener(CommandListener l) { listener = l; }
     public static String slug(String name) {
         if (name == null || name.isEmpty()) return "panel";
@@ -170,12 +179,17 @@ public class MqttPublisher {
         // v5: relays are switches, not binary_sensors (outbound MCU frames
         // found Oct 30, 2026 in McuTestActivity, proven live Oct 30).
         // Remove the old binary_sensor discovery so it does not linger.
+        // The switch config itself is mode-dependent (see
+        // publishRelaySwitchDiscovery): in momentary mode it is
+        // retracted and only the press event entity remains. The mode
+        // select is always published so the mode can be flipped from HA.
         for (int i = 1; i <= 3; i++) {
             doPublish("homeassistant/binary_sensor/" + slug + "_relay_" + i + "/config", "", true);
-            String cfg = "{\"name\":\"Relay " + i + "\",\"unique_id\":\"" + slug + "_relay_" + i + "\",\"state_topic\":\"" + root + "/relay/" + i + "\",\"command_topic\":\"" + root + "/relay/" + i + "/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
-            doPublish("homeassistant/switch/" + slug + "_relay_" + i + "/config", cfg, true);
+            publishRelaySwitchDiscovery(i);
             String ecfg = "{\"name\":\"Relay " + i + " press\",\"unique_id\":\"" + slug + "_relay_" + i + "_press\",\"state_topic\":\"" + root + "/relay/" + i + "/event\",\"event_types\":[\"press\"]," + avail + dev + "}";
             doPublish("homeassistant/event/" + slug + "_relay_" + i + "_press/config", ecfg, true);
+            String mcfg = "{\"name\":\"Relay " + i + " Mode\",\"unique_id\":\"" + slug + "_relay_" + i + "_mode\",\"state_topic\":\"" + root + "/relay/" + i + "/mode\",\"command_topic\":\"" + root + "/relay/" + i + "/mode/set\",\"options\":[\"relay\",\"momentary\"]," + avail + dev + "}";
+            doPublish("homeassistant/select/" + slug + "_relay_" + i + "_mode/config", mcfg, true);
         }
         // Night light: MCU side LED bar, brightness only, no colour
         // (F5SmallLightUtil: setSwitch + setBright 0-100, no colour API).
@@ -222,6 +236,22 @@ public class MqttPublisher {
         doPublish("homeassistant/switch/" + slug + "_debug/config", dcfg, true);
         Log.i(TAG, "mqtt discovery published, device=" + deviceName);
     }
+    // The relay switch discovery for one relay, honouring its mode:
+    // momentary mode publishes an empty config so HA removes the
+    // switch entity (the press event entity is separate and stays).
+    // Called from publishDiscovery and by the service on a mode change.
+    public synchronized void publishRelaySwitchDiscovery(int i) throws IOException {
+        if (relayMomentary[i]) {
+            doPublish("homeassistant/switch/" + slug + "_relay_" + i + "/config", "", true);
+            return;
+        }
+        String dev = "\"device\":{\"identifiers\":[\"" + slug + "\"],\"name\":\"" + json(deviceName) + "\",\"model\":\"F5-3\",\"manufacturer\":\"sznaner\"}";
+        String avail = "\"availability_topic\":\"" + root + "/availability\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\",";
+        String cfg = "{\"name\":\"Relay " + i + "\",\"unique_id\":\"" + slug + "_relay_" + i + "\",\"state_topic\":\"" + root + "/relay/" + i + "\",\"command_topic\":\"" + root + "/relay/" + i + "/set\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\"," + avail + dev + "}";
+        doPublish("homeassistant/switch/" + slug + "_relay_" + i + "/config", cfg, true);
+    }
+    public synchronized void publishRelayMode(int i) { try { publishRaw(root + "/relay/" + i + "/mode", relayMomentary[i] ? "momentary" : "relay", true); } catch (Exception e) { Log.w(TAG, "mqtt relay mode failed: " + e, e); } }
+    public synchronized void publishRelayModeStates() { for (int i = 1; i <= 3; i++) publishRelayMode(i); }
     public synchronized void buttonPress(int button) { try { publishRaw(root + "/button/" + button, "{\"event_type\":\"press\"}", false); } catch (Exception e) { Log.w(TAG, "mqtt press failed: " + e, e); } }
     public synchronized void relay(int relay, boolean on) { try { publishRaw(root + "/relay/" + relay, on ? "ON" : "OFF", true); } catch (Exception e) { Log.w(TAG, "mqtt relay failed: " + e, e); } }
     public synchronized void relayPress(int relay) { try { publishRaw(root + "/relay/" + relay + "/event", "{\"event_type\":\"press\"}", false); } catch (Exception e) { Log.w(TAG, "mqtt relay press failed: " + e, e); } }

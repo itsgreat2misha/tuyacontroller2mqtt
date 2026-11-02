@@ -35,6 +35,26 @@ import java.io.*;
 // toggle automations must trigger on the press event, not on state,
 // otherwise a lights->relay sync (external light change -> relay switch)
 // would re-trigger the toggle and loop.
+// Per-relay mode (Nov 2, 2026): each relay 1-3 is independently in
+// "relay" mode (default: HA switch exposed, HA may set it) or
+// "momentary" mode (HA switch retracted, only the press event
+// remains; after a physical press turns the relay on, the daemon
+// snaps it back off itself). Mode is an HA select per relay
+// (Relay N Mode), persisted in prefs as relay_<N>_momentary.
+// Rationale: the relays carry no loads -- the buttons are virtual --
+// and every relay set primes the MCU presence state invisibly: a
+// set activates the state (backlight on) WITHOUT a motion frame,
+// presence sustains it silently, and the eventual clear arrives in
+// HA as a clear-to-clear no-op, so HA-driven state sync flips made
+// panel motion miss real walk-ins (proven in the Nov 1-2 sniffer
+// tests). In momentary mode nothing flips a relay remotely, so the
+// only priming left coincides with a person at the panel.
+// Physical press = presence (Nov 2, 2026): any confirmed physical
+// press (momentary buttons and relay keys) also publishes motion
+// Detected, covering a press that lands before the radar's
+// idle->active edge; the episode ends on the panel's own clear,
+// which is presence-governed (sustained while someone is there,
+// ~43 s after they leave; ~20 s if the area was vacant throughout).
 // Transport: MQTT discovery, topics tuyacontroller/<device-slug>/...
 // su on this ROM: syntax is "su 0 <command...>", NOT "su -c ...".
 // The old "su -c input keyevent 224" failed with exit=1 for that reason
@@ -158,6 +178,30 @@ public class ButtonService extends Service {
     public static boolean debugEnabled(SharedPreferences p) {
         if (p.contains("debug_enabled")) return p.getBoolean("debug_enabled", false);
         return p.getBoolean("serial_debug_enabled", false);
+    }
+    // Per-relay mode (Nov 2, 2026; see the header comment): default is
+    // relay mode for every relay, so an upgraded daemon behaves
+    // exactly as before until a mode is flipped in HA.
+    public static boolean relayMomentary(SharedPreferences p, int relay) { return p.getBoolean("relay_" + relay + "_momentary", false); }
+    private void syncRelayModesToMqtt(SharedPreferences p) {
+        for (int i = 1; i <= 3; i++) mqtt.setRelayMomentary(i, relayMomentary(p, i));
+    }
+    private void setRelayMode(int relay, boolean momentary) {
+        SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+        p.edit().putBoolean("relay_" + relay + "_momentary", momentary).apply();
+        mqtt.setRelayMomentary(relay, momentary);
+        try { mqtt.publishRelaySwitchDiscovery(relay); mqtt.publishRelayMode(relay); } catch (Exception e) { Log.w(TAG, "relay mode publish failed: " + e); }
+        Log.i(TAG, "relay " + relay + " mode -> " + (momentary ? "momentary" : "relay"));
+        diag.event("relay " + relay + " mode -> " + (momentary ? "momentary" : "relay"));
+        if (momentary) {
+            // Momentary steady state is OFF: if the relay is on, snap
+            // it off now so the button LED does not stay lit.
+            if (lastRelayState[relay] == 1) setRelay(relay, false);
+        } else {
+            // Refresh the restored switch's state right away instead
+            // of waiting for the next poll tick.
+            sendQuery();
+        }
     }
     // Created in onStartCommand with getFilesDir() (not available at
     // construction time); all diag-using threads start after that.
@@ -312,9 +356,14 @@ public class ButtonService extends Service {
         if (host.isEmpty()) return;
         int port = 1883;
         try { port = Integer.parseInt(p.getString("port", "1883")); } catch (Exception ignored) {}
+        // Relay modes must be on the publisher BEFORE connect():
+        // connect publishes discovery, and momentary relays' switch
+        // configs depend on them.
+        syncRelayModesToMqtt(p);
         mqtt.connect(host, port, p.getString("user", ""), PasswordStore.getPassword(p), deviceName(this, p));
         diag.event("mqtt connected to " + host + ":" + port); diag.metrics(metricsSnapshot("mqtt-connect"));
         mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p));
+        mqtt.publishRelayModeStates();
         // Sync relay states immediately, and publish current device states
         // (brightness/volume/screen/rotation/proc/nightlight) so HA does
         // not wait for a physical event or a poll tick.
@@ -553,6 +602,11 @@ public class ButtonService extends Service {
             else if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 enqueuePublish(new PublishAction(PublishAction.BUTTON, f[5] & 0xff, false));
+                // Physical press = presence (Nov 2, 2026; see header):
+                // publish Detected now; the panel's own clear ends the
+                // episode. Covers a press landing before the radar edge.
+                lastMotionState = 1;
+                enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true));
             } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 // Relay 4 is a query-only channel: its frame is
@@ -600,18 +654,43 @@ public class ButtonService extends Service {
                         pressThreadRunning = true;
                         new Thread(() -> {
                             try { Thread.sleep(350); } catch (InterruptedException ignored) {}
+                            // Snapshot under the lock, act outside it:
+                            // the snap-back below sleeps in setRelay,
+                            // and the read thread must not wait on that.
+                            java.util.ArrayList<int[]> batch;
+                            boolean hasRelay4 = false;
                             synchronized (pendingPresses) {
-                                boolean hasRelay4 = false;
-                                for (int[] pr : pendingPresses) if (pr[0] == 4) hasRelay4 = true;
-                                if (!hasRelay4) {
-                                    for (int[] pr : pendingPresses) {
-                                        if (pr[0] < 1 || pr[0] > 3) continue;
-                                        Log.i(TAG, "physical relay press: relay=" + pr[0] + " on=" + (pr[1] == 1));
-                                        enqueuePublish(new PublishAction(PublishAction.RELAY_PRESS, pr[0], false));
-                                    }
-                                }
+                                batch = new java.util.ArrayList<int[]>(pendingPresses);
+                                for (int[] pr : batch) if (pr[0] == 4) hasRelay4 = true;
                                 pendingPresses.clear();
                                 pressThreadRunning = false;
+                            }
+                            if (hasRelay4) return;
+                            SharedPreferences p = getSharedPreferences("f5", MODE_PRIVATE);
+                            int[] lastPressState = new int[]{-1, -1, -1, -1, -1};
+                            for (int[] pr : batch) {
+                                if (pr[0] < 1 || pr[0] > 3) continue;
+                                Log.i(TAG, "physical relay press: relay=" + pr[0] + " on=" + (pr[1] == 1));
+                                enqueuePublish(new PublishAction(PublishAction.RELAY_PRESS, pr[0], false));
+                                lastPressState[pr[0]] = pr[1];
+                            }
+                            // Physical press = presence (Nov 2, 2026;
+                            // see header): publish Detected now; the
+                            // panel's own clear ends the episode.
+                            lastMotionState = 1;
+                            enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true));
+                            // Momentary snap-back: a press that left a
+                            // momentary relay ON is undone by the daemon
+                            // itself, locally on the serial wire (no
+                            // MQTT round trip), so the button LED stays
+                            // lit well under a second. A press that
+                            // turned it OFF needs nothing.
+                            for (int r = 1; r <= 3; r++) {
+                                if (lastPressState[r] == 1 && relayMomentary(p, r)) {
+                                    Log.i(TAG, "momentary snap-back: relay=" + r);
+                                    diag.event("momentary snap-back relay " + r);
+                                    setRelay(r, false);
+                                }
                             }
                         }).start();
                     }
@@ -693,6 +772,7 @@ public class ButtonService extends Service {
                 for (int rr = 1; rr <= 3; rr++) if (lastRelayState[rr] >= 0) mqtt.relay(rr, lastRelayState[rr] == 1);
                 if (lastMotionState >= 0) mqtt.motion(lastMotionState == 1);
                 mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p));
+                mqtt.publishRelayModeStates();
                 mqtt.volumeStream("system", volumePctFor(AudioManager.STREAM_SYSTEM));
                 mqtt.volumeStream("notification", volumePctFor(AudioManager.STREAM_NOTIFICATION));
                 mqtt.volumeStream("alarm", volumePctFor(AudioManager.STREAM_ALARM));
@@ -771,10 +851,24 @@ public class ButtonService extends Service {
             boolean on = "ON".equalsIgnoreCase(pl);
             SharedPreferences.Editor ed = p.edit(); ed.putBoolean("wakescreen_enabled", on); ed.apply();
             try { mqtt.publishOptionStates(wakelockEnabled(p), wakescreenEnabled(p), debugEnabled(p)); } catch (Exception e) { Log.w(TAG, "option publish failed: " + e); }
+        } else if (topic.matches(".*/relay/[0-9]+/mode/set")) {
+            String[] parts = topic.split("/");
+            int relay = Integer.parseInt(parts[parts.length - 3]);
+            if (relay >= 1 && relay <= 3) {
+                if ("momentary".equalsIgnoreCase(pl)) setRelayMode(relay, true);
+                else if ("relay".equalsIgnoreCase(pl)) setRelayMode(relay, false);
+            }
         } else if (topic.matches(".*/relay/[0-9]+/set")) {
             String[] parts = topic.split("/");
             int relay = Integer.parseInt(parts[parts.length - 2]);
-            if (relay >= 1 && relay <= 4) setRelay(relay, "ON".equalsIgnoreCase(pl));
+            if (relay >= 1 && relay <= 4) {
+                // A momentary relay has no HA switch, so a set can only
+                // arrive from a stale entity or a manual publish: ignore
+                // it -- remote flips are exactly what momentary mode
+                // exists to prevent.
+                if (relay <= 3 && relayMomentary(p, relay)) { Log.i(TAG, "relay set ignored: relay " + relay + " is in momentary mode"); }
+                else setRelay(relay, "ON".equalsIgnoreCase(pl));
+            }
         } else if (topic.endsWith("/nightlight/set")) {
             setNightLight("ON".equalsIgnoreCase(pl), null);
         } else if (topic.endsWith("/nightlight/brightness/set")) {
