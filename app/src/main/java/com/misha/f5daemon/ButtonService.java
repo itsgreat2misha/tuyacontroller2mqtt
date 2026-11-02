@@ -69,6 +69,71 @@ public class ButtonService extends Service {
     private volatile boolean pressThreadRunning = false;
     private volatile boolean connecting = false;
     private final MqttPublisher mqtt = new MqttPublisher();
+    // Frame-loss improvements (Nov 1, 2026, audit): serial reading and
+    // MQTT publishing are decoupled. readLoop only parses frames and
+    // updates tracked state; every MQTT publish it would have done is
+    // enqueued as a PublishAction and executed by publisherLoop, the
+    // single thread that publishes frame-derived messages. A slow
+    // broker, a reconnect, or a discovery publish can therefore stall
+    // publishing for seconds without ever stalling serial reading —
+    // the queue absorbs the stall (capacity 1000, drop oldest with a
+    // log line if it ever fills, which should never happen at
+    // event-driven rates). Press batching still uses ARRIVAL time
+    // (see handleFrameArrival), so a publishing backlog cannot merge
+    // or split a query batch. pollLoop, connectNow, and handleCommand
+    // still publish directly (they are not on the read thread); their
+    // lock contention with publisherLoop only delays publishes, never
+    // frame parsing. Queue counters are in metricsSnapshot.
+    private static final class PublishAction {
+        static final int MOTION = 1, BUTTON = 2, RELAY = 3, RELAY_PRESS = 4;
+        final int type; final int a; final boolean b;
+        PublishAction(int type, int a, boolean b) { this.type = type; this.a = a; this.b = b; }
+    }
+    private final java.util.concurrent.ArrayBlockingQueue<PublishAction> publishQueue =
+        new java.util.concurrent.ArrayBlockingQueue<PublishAction>(1000);
+    private volatile boolean publisherRunning = false;
+    private volatile long queueDroppedCount = 0;
+    private void enqueuePublish(PublishAction act) {
+        if (!publishQueue.offer(act)) {
+            // Queue full: drop the oldest frame publish, never the
+            // newest — a stale state is healed by the 5 s poll anyway.
+            publishQueue.poll();
+            queueDroppedCount++;
+            Log.w(TAG, "publish queue full, dropped oldest action");
+            diag.event("publish queue full, dropped oldest action");
+            publishQueue.offer(act);
+        }
+    }
+    private void publisherLoop() {
+        while (publisherRunning) {
+            try {
+                PublishAction act = publishQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (act == null) continue;
+                try {
+                    if (act.type == PublishAction.MOTION) mqtt.motion(act.b);
+                    else if (act.type == PublishAction.BUTTON) mqtt.buttonPress(act.a);
+                    else if (act.type == PublishAction.RELAY) mqtt.relay(act.a, act.b);
+                    else if (act.type == PublishAction.RELAY_PRESS) mqtt.relayPress(act.a);
+                } catch (Exception e) { Log.w(TAG, "queued publish failed: " + e); diag.event("queued publish failed: " + e); }
+            } catch (InterruptedException ignored) { break; }
+        }
+    }
+    // Serial health probe (Nov 1, 2026, audit): a query every 15 min
+    // (pollLoop ticks) proves the MCU -> serial -> daemon path is
+    // alive. Any frame arriving within 2 s of the probe counts as a
+    // response (it proves the path, whatever its type). On a miss,
+    // pollLoop closes serialIn, which makes readLoop throw and reopen
+    // with backoff (existing mechanism), and retries the probe once
+    // on the next poll tick. probeRequested is set by the OFF-without-ON
+    // warning (below) for an immediate, throttled probe.
+    private volatile boolean probePending = false;
+    private volatile long probeQueryTimeMs = 0;
+    private volatile long probeStartFrames = 0;
+    private volatile boolean probeRetryPending = false;
+    private volatile boolean probeRetryUsed = false;
+    private volatile long lastProbeTimeMs = 0;
+    private volatile boolean probeRequested = false;
+    private volatile boolean ttyScanDone = false;
     @Override public IBinder onBind(Intent i) { return null; }
     public static String deviceName(Context ctx, SharedPreferences p) {
         String saved = p.getString("device_name", null);
@@ -121,8 +186,11 @@ public class ButtonService extends Service {
         if (f[2] == 0x1c) return "motion ON";
         if (f[2] == 0x0c) return "motion OFF";
         if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) return "button press id=" + (f[5] & 0xff);
+        // Query frame fc 00 00 aa ff 00 fe must be checked BEFORE the
+        // relay branch (aa & f0 == a0 would otherwise label it
+        // "relay 0 OFF").
+        if (f[2] == 0x00 && f[3] == (byte) 0xaa) return "query";
         if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) return "relay " + (f[5] & 0xff) + " " + (f[4] == 0x01 ? "ON" : "OFF") + " (f3=" + String.format("%02x", f[3]) + ")";
-        if (f[2] == 0x00 && f[3] == 0x00 && f[4] == (byte) 0xaa) return "query response marker";
         return "unknown f2=" + String.format("%02x", f[2]) + " f3=" + String.format("%02x", f[3]);
     }
     private String readFirstLine(String path) {
@@ -157,6 +225,8 @@ public class ButtonService extends Service {
             + " temp0=" + t0 + " temp1=" + t1 + " screen=" + scr + " mqtt=" + mqtt.connected()
             + " motion=" + lastMotionState + " motionAge_s=" + motionAge + " lastFrameAge_s=" + frameAge
             + " frames=" + frameCount + " dropped=" + droppedFrameCount + " serialErrors=" + serialErrorCount
+            + " queueDropped=" + queueDroppedCount + " queueSize=" + publishQueue.size()
+            + " probePending=" + probePending
             + " lastFrame=" + lastFrameHex;
     }
     private void enforceDesiredRotation() {
@@ -224,6 +294,7 @@ public class ButtonService extends Service {
             catch (Exception e) { Log.w(TAG, "mqtt command failed: " + e, e); }
         });
         if (!running) { running = true; new Thread(this::readLoop).start(); }
+        if (!publisherRunning) { publisherRunning = true; new Thread(this::publisherLoop).start(); }
         if (!reconnectRunning) { reconnectRunning = true; new Thread(this::reconnectLoop).start(); }
         if (!pollRunning) { pollRunning = true; new Thread(this::pollLoop).start(); }
         mqtt.disconnect();
@@ -335,7 +406,7 @@ public class ButtonService extends Service {
         byte last = (relay >= 1 && relay <= 3) ? (byte) relay : (byte) 0x00;
         writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), last, (byte) 0xfe});
         // Optimistic state publish; the following query batch will
-        // confirm the same state (suppressed as a press, see handleFrame).
+        // confirm the same state (suppressed as a press, see handleFrameArrival).
         if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
         try { mqtt.relay(relay, on); } catch (Exception e) { Log.w(TAG, "relay publish failed: " + e); }
         try { Thread.sleep(200); } catch (InterruptedException ignored) {}
@@ -382,45 +453,68 @@ public class ButtonService extends Service {
     //    there too, with counters in every metrics snapshot, so
     //    the drop rate is visible long-term instead of in a 10-min
     //    logcat window.
-    // Not changed, by design: handleFrame sets lastMotionState
-    // BEFORE publishing, so a single failed MQTT publish (QoS 0,
-    // caught and logged) heals within one 5 s poll tick; and
-    // handleFrame runs synchronously on the read thread, so a slow
-    // MQTT reconnect can stall serial reading for seconds -- the
-    // 4096-byte tty buffer holds ~585 frames, far above the
-    // event-driven rate here, so this is a theoretical, not a
-    // practical, loss vector, and decoupling it would risk the
-    // 350 ms press-batching timing.
+    // Frame-loss improvements (Nov 1, 2026, audit), superseding the
+    // old "handleFrame runs on the read thread" design: handleFrame
+    // is now handleFrameArrival, which only updates tracked state
+    // and enqueues MQTT publishes (see PublishAction). A slow broker
+    // or reconnect therefore stalls publishing, never serial
+    // reading. lastMotionState is still set BEFORE the publish is
+    // enqueued, so a single failed QoS 0 publish still heals within
+    // one 5 s poll tick. Press batching still uses the 350 ms window
+    // from first-frame processing, which is arrival time in practice
+    // because handleFrameArrival is fast (no network, no metrics
+    // snapshot — the 30 s periodic snapshot covers motion age).
     private void readLoop() {
+        try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_MORE_FAVORABLE); } catch (Exception ignored) {}
         long backoffMs = 1000;
         while (running) {
             try { Runtime.getRuntime().exec(new String[]{"sh", "-c", "stty -F /dev/ttyAS2 115200 raw"}).waitFor(); } catch (Exception e) { Log.w(TAG, "stty failed", e); }
             try {
                 serialIn = new FileInputStream("/dev/ttyAS2");
+                if (!ttyScanDone) {
+                    ttyScanDone = true;
+                    // Best-effort competing-reader guard: Android
+                    // hides other processes' /proc/<pid>/fd from an
+                    // app, so this can only confirm the daemon's own
+                    // fds — a full check still needs adb /proc/*/fd.
+                    int ttyFds = 0;
+                    try {
+                        java.io.File[] fds = new java.io.File("/proc/self/fd").listFiles();
+                        if (fds != null) for (java.io.File fd : fds) {
+                            try { if ("/dev/ttyAS2".equals(fd.getCanonicalPath())) ttyFds++; } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                    Log.i(TAG, "tty reader scan: own ttyAS2 fds=" + ttyFds + " (other pids hidden from app, check via adb if a miss is suspected)");
+                    diag.event("tty reader scan: own ttyAS2 fds=" + ttyFds + " (other pids hidden from app)");
+                }
                 byte[] frame = new byte[7]; int pos = 0;
+                byte[] buf = new byte[64];
                 while (running) {
-                    int b = serialIn.read(); if (b < 0) throw new java.io.EOFException("ttyAS2 EOF");
-                    if (pos > 0 && b == 0xfc) {
-                        droppedFrameCount++;
-                        String partial = hex(frame, pos);
-                        Log.i(TAG, "serial frame partial discarded on resync: " + partial);
-                        diag.serial("dropped partial frame: " + partial + " (resync on 0xfc)");
-                        frame[0] = (byte) b; pos = 1; continue;
-                    }
-                    if (pos == 0 && b != 0xfc) continue;
-                    frame[pos++] = (byte) b;
-                    if (pos == 7) {
-                        pos = 0;
-                        if (frame[6] == (byte) 0xfe) {
-                            byte[] copy = java.util.Arrays.copyOf(frame, 7);
-                            frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, 7);
-                            backoffMs = 1000;
-                            handleFrame(copy);
-                        } else {
+                    int n = serialIn.read(buf); if (n < 0) throw new java.io.EOFException("ttyAS2 EOF");
+                    for (int i = 0; i < n; i++) {
+                        int b = buf[i] & 0xff;
+                        if (pos > 0 && b == 0xfc) {
                             droppedFrameCount++;
-                            String bad = hex(frame, 7);
-                            Log.i(TAG, "serial frame bad end (dropped, no fe): " + bad);
-                            diag.serial("dropped bad frame: " + bad);
+                            String partial = hex(frame, pos);
+                            Log.i(TAG, "serial frame partial discarded on resync: " + partial);
+                            diag.serial("dropped partial frame: " + partial + " (resync on 0xfc)");
+                            frame[0] = (byte) b; pos = 1; continue;
+                        }
+                        if (pos == 0 && b != 0xfc) continue;
+                        frame[pos++] = (byte) b;
+                        if (pos == 7) {
+                            pos = 0;
+                            if (frame[6] == (byte) 0xfe) {
+                                byte[] copy = java.util.Arrays.copyOf(frame, 7);
+                                frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, 7);
+                                backoffMs = 1000;
+                                handleFrameArrival(copy);
+                            } else {
+                                droppedFrameCount++;
+                                String bad = hex(frame, 7);
+                                Log.i(TAG, "serial frame bad end (dropped, no fe): " + bad);
+                                diag.serial("dropped bad frame: " + bad);
+                            }
                         }
                     }
                 }
@@ -437,16 +531,28 @@ public class ButtonService extends Service {
             }
         }
     }
-    private void handleFrame(byte[] f) {
+    private void handleFrameArrival(byte[] f) {
         String frameHex = hex(f, 7);
         Log.i(TAG, "frame: " + frameHex);
         diag.serial("IN " + frameHex + " " + decodeFrame(f));
         try {
-            if (f[2] == 0x1c) { lastMotionState = 1; lastMotionFrameTimeMs = System.currentTimeMillis(); mqtt.motion(true); diag.metrics(metricsSnapshot("motion-on")); }
-            else if (f[2] == 0x0c) { lastMotionState = 0; lastMotionFrameTimeMs = System.currentTimeMillis(); mqtt.motion(false); diag.metrics(metricsSnapshot("motion-off")); }
+            if (f[2] == 0x1c) { lastMotionState = 1; lastMotionFrameTimeMs = System.currentTimeMillis(); enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true)); }
+            else if (f[2] == 0x0c) {
+                // OFF-without-ON warning (Nov 1, 2026, audit): an OFF
+                // while already clear means either a repeat clear or
+                // a missed ON. The first OFF after service start
+                // (lastMotionState == -1) is exempt. Log it and ask
+                // pollLoop for an immediate, throttled health probe.
+                if (lastMotionState == 0) {
+                    Log.w(TAG, "motion OFF without preceding ON - possible missed ON");
+                    diag.event("motion OFF without preceding ON - possible missed ON");
+                    probeRequested = true;
+                }
+                lastMotionState = 0; lastMotionFrameTimeMs = System.currentTimeMillis(); enqueuePublish(new PublishAction(PublishAction.MOTION, 0, false));
+            }
             else if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
-                mqtt.buttonPress(f[5] & 0xff);
+                enqueuePublish(new PublishAction(PublishAction.BUTTON, f[5] & 0xff, false));
             } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
                 if (wakescreenEnabled(getSharedPreferences("f5", MODE_PRIVATE))) wakeScreen();
                 // Relay 4 is a query-only channel: its frame is
@@ -471,7 +577,7 @@ public class ButtonService extends Service {
                 int relay = f[5] & 0xff;
                 boolean on = f[4] == 0x01;
                 if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
-                mqtt.relay(relay, on);
+                enqueuePublish(new PublishAction(PublishAction.RELAY, relay, on));
                 boolean queryBatch = System.currentTimeMillis() - lastQueryTime < 5000;
                 boolean justSet = System.currentTimeMillis() - lastSetTime < 5000 && relay == lastSetRelay && on == lastSetState;
                 if (queryBatch || justSet) {
@@ -500,7 +606,8 @@ public class ButtonService extends Service {
                                 if (!hasRelay4) {
                                     for (int[] pr : pendingPresses) {
                                         if (pr[0] < 1 || pr[0] > 3) continue;
-                                        try { mqtt.relayPress(pr[0]); Log.i(TAG, "physical relay press: relay=" + pr[0] + " on=" + (pr[1] == 1)); } catch (Exception e) { Log.w(TAG, "relay press publish failed: " + e); }
+                                        Log.i(TAG, "physical relay press: relay=" + pr[0] + " on=" + (pr[1] == 1));
+                                        enqueuePublish(new PublishAction(PublishAction.RELAY_PRESS, pr[0], false));
                                     }
                                 }
                                 pendingPresses.clear();
@@ -511,10 +618,11 @@ public class ButtonService extends Service {
                 }
             }
         } catch (Exception e) {
-            // lastMotionState was already set above, so a single
-            // failed QoS 0 publish heals on the next 5 s poll tick.
-            Log.w(TAG, "mqtt publish failed", e);
-            diag.event("mqtt publish failed for frame " + frameHex + ": " + e);
+            // Tracked state was already set above, so a single failed
+            // enqueue still heals on the next 5 s poll tick (poll
+            // republishes lastMotionState / lastRelayState directly).
+            Log.w(TAG, "frame handling failed", e);
+            diag.event("frame handling failed for frame " + frameHex + ": " + e);
         }
     }
     // ---- device state: get / set / poll ----
@@ -593,6 +701,19 @@ public class ButtonService extends Service {
             }
         } catch (Exception e) { Log.w(TAG, "device state publish failed: " + e); }
     }
+    private void sendProbe(String why) {
+        // Throttled by the caller (60 s minimum between probes, except
+        // the one retry after a failure). A probe is just a query: the
+        // MCU answers with the a1–a4 state batch, which handleFrameArrival
+        // suppresses as presses (queryBatch window), so it has no
+        // side effects in HA beyond republishing unchanged states.
+        probePending = true; probeQueryTimeMs = System.currentTimeMillis();
+        probeStartFrames = frameCount; lastProbeTimeMs = probeQueryTimeMs;
+        if (!"retry after failure".equals(why)) probeRetryUsed = false;
+        Log.i(TAG, "serial health probe (" + why + ")");
+        diag.event("serial health probe (" + why + ")");
+        sendQuery();
+    }
     private void pollLoop() {
         int tick = 0;
         while (pollRunning) {
@@ -600,6 +721,37 @@ public class ButtonService extends Service {
             tick++;
             // Metrics every 30 s: every 6th 5 s tick, no new thread.
             if (tick % 6 == 0) diag.metrics(metricsSnapshot("periodic-30s"));
+            // Health probe: every 15 min (180 ticks), an immediate
+            // probe requested by an OFF-without-ON warning (throttled
+            // to 60 s), or the single retry after a failed probe.
+            long now = System.currentTimeMillis();
+            if (probePending) {
+                if (frameCount > probeStartFrames) {
+                    probePending = false; probeRetryPending = false;
+                    Log.i(TAG, "serial health probe OK");
+                    diag.event("serial health probe OK");
+                } else if (now - probeQueryTimeMs > 2000) {
+                    probePending = false;
+                    Log.w(TAG, "serial health probe FAILED: no frame in 2 s");
+                    diag.event("serial health probe FAILED: no frame in 2 s");
+                    // Close serialIn from here: readLoop's blocked
+                    // read() throws, and its catch reopens with
+                    // backoff (existing mechanism). If the probe
+                    // failed because the reader was dead, this is
+                    // what revives it; if the MCU was silent, the
+                    // reopen is harmless.
+                    try { if (serialIn != null) serialIn.close(); } catch (Exception ignored) {}
+                    if (!probeRetryUsed) { probeRetryPending = true; probeRetryUsed = true; }
+                }
+            } else if (probeRetryPending) {
+                probeRetryPending = false;
+                sendProbe("retry after failure");
+            } else if (tick % 180 == 0) {
+                sendProbe("15-min");
+            } else if (probeRequested && now - lastProbeTimeMs > 60000) {
+                probeRequested = false;
+                sendProbe("OFF-without-ON");
+            }
             try { Thread.sleep(5000); } catch (InterruptedException ignored) { break; }
         }
     }
@@ -676,7 +828,7 @@ public class ButtonService extends Service {
     }
     @Override public void onDestroy() {
         if (diag != null) diag.event("service stopped");
-        running = false; reconnectRunning = false; pollRunning = false;
+        running = false; reconnectRunning = false; pollRunning = false; publisherRunning = false;
         try { if (serialIn != null) serialIn.close(); } catch (Exception ignored) {}
         try { if (serialOut != null) serialOut.close(); } catch (Exception ignored) {}
         mqtt.disconnect();

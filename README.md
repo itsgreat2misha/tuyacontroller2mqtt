@@ -165,8 +165,9 @@ Android Settings or Kiosk update HA, not just changes made from HA.
     storage (`/data/data/com.misha.f5daemon/files/diag/`, pull
     with adb): `serial.log` (every frame in/out, hex + decoded,
     plus dropped/bad frames), `metrics.log` (a snapshot every
-    30 s plus event-triggered snapshots on motion frames, MQTT
-    connect/disconnect and serial reopen), and `events.log`
+    30 s plus event-triggered snapshots on MQTT connect/disconnect
+    and serial reopen; motion frames no longer snapshot, to keep the
+    serial thread fast), and `events.log`
     (lifecycle and errors). Hard total cap 30 MB (serial 5 MB,
     metrics 20 MB, events 5 MB, oldest files deleted on rotation),
     plus a pause if /data free space drops below 100 MB, so it

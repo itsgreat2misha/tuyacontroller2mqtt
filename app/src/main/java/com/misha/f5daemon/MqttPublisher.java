@@ -1,6 +1,7 @@
 package com.misha.f5daemon;
 import android.util.Log;
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 // Minimal MQTT 3.1.1 client, QoS 0, no dependencies.
 // Paho was removed: its ResourceBundle log properties are not in a dex,
@@ -34,7 +35,11 @@ public class MqttPublisher {
         closeQuietly();
         this.host = host; this.port = port; this.user = user; this.pass = pass; this.deviceName = deviceName;
         this.slug = slug(deviceName); this.root = "tuyacontroller/" + slug;
-        socket = new Socket(host, port); socket.setSoTimeout(5000);
+        // Bounded connect (Nov 1, 2026, audit): the no-timeout
+        // Socket constructor could block for the OS TCP timeout
+        // (~120 s) on an unreachable broker, stalling whichever
+        // thread was publishing. 3 s is ample on the LAN.
+        Socket s = new Socket(); s.connect(new InetSocketAddress(host, port), 3000); socket = s; socket.setSoTimeout(5000);
         out = socket.getOutputStream(); in = socket.getInputStream();
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         writeString(body, "MQTT"); body.write(4);
