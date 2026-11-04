@@ -13,7 +13,11 @@ adopted in 1.2.0.
 
 ## Unreleased
 
-Nothing yet.
+- Docs: motion-vs-presence question closed. A stand-still test on
+  2026-11-03 (detection cleared after ~40 s with a person standing
+  very still in front of the panel) confirmed the F5-3 sensor is
+  motion, not presence; the `device_class: motion` naming is
+  verified correct.
 
 ## 1.2.0 — unreleased (pending first signed release)
 
