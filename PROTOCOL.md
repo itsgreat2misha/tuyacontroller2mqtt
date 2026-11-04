@@ -84,7 +84,10 @@ detection, and the observed behaviour (fires on walk-up, clears after
 30–60 s idle) fits motion. The entity is therefore Motion with
 `device_class: motion`, not Occupancy.
 
-Decisive test still open: stand still in front of the panel for over
-60 s — if the sensor stays on, it is static presence and the
-class/name should flip to Occupancy/Presence; if it clears while you
-are still there, motion is confirmed.
+Decisive test performed 2026-11-03 (~20:01 EST): the panel owner
+stood very still in front of the entryway panel. Detection cleared
+after ~40 seconds and the buttons turned off; moving again
+re-detected immediately. A static-presence (mmWave) sensor would
+have continued to detect the stationary person. Verdict: the sensor
+is **motion, not presence** — the `device_class: motion` naming is
+confirmed correct.
