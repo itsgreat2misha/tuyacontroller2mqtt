@@ -24,10 +24,10 @@ Port: the profile's serial device (`/dev/ttyAS2` on the F5-3) at
 | `fc 00 00 a3 <01/00> 03 fe` | Relay 3 state |
 | `fc 00 00 a4 00 00 fe` | Relay 4 marker — terminates a query batch (its id byte is `00`, not `04`; detect it via the `a4` code byte) |
 
-The entity number IS the frame's id/code byte: relays 1–3, then
-momentary buttons 4–8. A hold is one frame, indistinguishable from a
-tap; a double-tap is two frames — detect either by timing in Home
-Assistant if needed.
+The entity number IS the frame's id/code byte: buttons 1–3 switch
+relays 1–3, and buttons 4–8 are momentary-only. A hold is one frame,
+indistinguishable from a tap; a double-tap is two frames — detect
+either by timing in Home Assistant if needed.
 
 ## Outbound frames (Android → MCU)
 
@@ -73,21 +73,12 @@ HA-driven state sync can make panel motion sensing miss real
 walk-ins. In momentary mode nothing flips a relay remotely, so the
 only activation left coincides with a person at the panel.
 
-## Motion vs presence — research note
+## Motion, not presence
 
 The F5 manual calls the sensor "Induction (Radar PIR)" and describes
 waving a hand to trigger it; vendor code calls the frames
-`F5MessageSensorChange`, not presence. Traditional PIR detects
-movement only; true mmWave presence sensors detect a stationary
-person (breathing, micro-motion). No F5 specification claims static
-detection, and the observed behaviour (fires on walk-up, clears after
-30–60 s idle) fits motion. The entity is therefore Motion with
-`device_class: motion`, not Occupancy.
-
-Decisive test performed 2026-11-03 (~20:01 EST): the panel owner
-stood very still in front of the entryway panel. Detection cleared
-after ~40 seconds and the buttons turned off; moving again
-re-detected immediately. A static-presence (mmWave) sensor would
-have continued to detect the stationary person. Verdict: the sensor
-is **motion, not presence** — the `device_class: motion` naming is
-confirmed correct.
+`F5MessageSensorChange`, not presence. The sensor detects movement
+only: it fires when a person approaches and clears after ~30–60 s
+without movement, so — unlike a presence (mmWave) sensor — it does
+not detect a stationary person. The entity is therefore exposed as
+Motion with `device_class: motion`, not Occupancy.

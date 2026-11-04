@@ -23,7 +23,7 @@ MCU protocol has been captured and a device profile written":
 
 | Model | SoC | Android | Serial device | Buttons | Relays | Sensor | Night light | Status |
 |---|---|---|---|---|---|---|---|---|
-| F5-3 | Allwinner A133 | 11 | /dev/ttyAS2 @ 115200 | 5 momentary (4–8) | 3 (+1 query-only) | Motion (see note) | Yes | **Tested** |
+| F5-3 | Allwinner A133 | 11 | /dev/ttyAS2 @ 115200 | 8 (1–3 relay, 4–8 momentary) | 3 (+1 query-only channel) | Motion (see note) | Yes | **Tested** |
 | Any other model | — | — | — | — | — | — | — | Untested — needs a device profile |
 
 Hardware differences live in a single `DeviceProfile` in the code, so
@@ -31,13 +31,10 @@ supporting another panel is mostly a matter of capturing its frames
 and adding a profile. Contributions are welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Motion, not presence — verified:** the F5-3 sensor is exposed as
-a motion sensor (`device_class: motion`), and that is now proven,
-not just inferred. In a stand-still test on 2026-11-03, a person
-stood very still in front of the panel: detection cleared after
-~40 seconds and the buttons turned off, and moving again re-detected
-immediately. A true presence sensor would have kept detecting the
-stationary person. Details in [PROTOCOL.md](PROTOCOL.md).
+**Motion, not presence:** the F5-3 sensor is exposed as a motion
+sensor (`device_class: motion`). It triggers on movement and clears
+after roughly 30–60 seconds without movement, so it does not detect
+a person standing still. Details in [PROTOCOL.md](PROTOCOL.md).
 
 ## Requirements
 
@@ -107,9 +104,12 @@ the service after boot with whatever launcher/kiosk tooling you use:
 
 ## Home Assistant entities (MQTT discovery)
 
-Per panel, under the device named after the panel:
+Per panel, under the device named after the panel. The F5-3 has
+eight physical buttons: buttons 1–3 switch relays 1–3, and buttons
+4–8 are momentary-only.
 
-- `event` Button 4–8 — physical press events (momentary buttons).
+- `event` Button 4–8 — physical press events (the momentary-only
+  buttons).
 - `switch` Relay 1–3 — relay state, with `event` Relay N press for
   physical presses. Automations should trigger on the **press event**,
   not on relay state (see PROTOCOL.md for why).
@@ -215,8 +215,10 @@ including mains circuits.
 - **Only the F5-3 is tested.** Any other model is untested and needs
   a device profile before it can be supported (see Supported
   devices and CONTRIBUTING.md).
-- **The F5-3 sensor is motion, not presence** — a person standing
-  very still stops being detected (verified; see Supported devices).
+- **The F5-3 sensor is motion, not presence** — it triggers on
+  movement and clears after roughly 30–60 seconds without movement,
+  so a person standing still is not detected (see Supported
+  devices).
 - **The night light is brightness only**, with no colour control,
   and its state is optimistic because the MCU sends no status frame
   for it.
@@ -258,7 +260,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## More documentation
 
 - [PROTOCOL.md](PROTOCOL.md) — the decoded serial protocol, press vs
-  query-batch discernment, and the motion-vs-presence research note.
+  query-batch discernment, and the motion sensor behaviour.
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — including how to contribute a
   device profile for another panel model.
