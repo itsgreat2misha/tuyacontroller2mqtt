@@ -39,10 +39,12 @@ and adding a profile. Contributions are welcome — see
   world read/write, so no root is needed for the core functions).
 - Optional, feature-dependent:
   - **root (su)** for screen on/off and reboot commands;
-  - the **Write Settings** grant (offered in the app's settings
-    screen) for brightness and rotation commands; without it those
-    commands are refused and Home Assistant reverts to the actual
-    polled value.
+  - the **Write Settings** grant for brightness and rotation
+    commands; without it those commands are refused and Home
+    Assistant reverts to the actual polled value. On a panel with
+    `su` the app applies this grant itself at start; otherwise use
+    the button in the app's settings screen (it shows whether the
+    grant is in place).
 
 ## Install
 
@@ -188,9 +190,11 @@ Read this before exposing the daemon beyond a trusted network:
   panel trusts (public CA, or a local CA installed into the system
   store), or keep the panel on a trusted LAN with plaintext.
 - **Brightness or rotation commands are refused or revert.** Those
-  commands require the **Write Settings** grant (offered in the
-  app's settings screen); without it the commands are refused and
-  Home Assistant reverts to the actual polled value.
+  commands require the **Write Settings** grant. With `su` the app
+  grants it to itself at start; without `su`, grant it from the
+  button in the app's settings screen — if the button reads
+  "Write Settings: granted" the grant is in place and something
+  else is wrong.
 - **Screen on/off or reboot commands do not work.** Those commands
   run through `su` where the ROM provides it, so they require root
   (see Requirements).
@@ -215,7 +219,8 @@ Read this before exposing the daemon beyond a trusted network:
   for it.
 - **Feature-dependent permissions:** screen on/off and reboot
   require root (`su`); brightness and rotation require the Write
-  Settings grant. Without them, those commands do not work.
+  Settings grant (applied by the app itself when `su` is present).
+  Without them, those commands do not work.
 - **MQTT authorization is the broker's job.** The daemon
   authenticates to the broker but has no per-command authorization
   of its own, and without TLS MQTT is plaintext (see Security).
