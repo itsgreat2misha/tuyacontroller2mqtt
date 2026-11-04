@@ -16,6 +16,28 @@ import android.widget.*;
 // Options are shared with HA: the Wake Lock / Wake Screen switches in HA
 // write the same prefs these checkboxes edit, and vice versa.
 public class MainActivity extends Activity {
+    private Button grantWriteButton;
+    // The grant button mirrors the live Write Settings state: enabled
+    // with the grant prompt while the grant is missing, disabled and
+    // labelled granted once it is in place (by the system settings
+    // screen or by the su auto-grant). Refreshed on resume and when an
+    // auto-grant attempt lands, so it never shows a stale state.
+    private void refreshGrantButton() {
+        if (grantWriteButton == null) return;
+        boolean granted = WriteSettingsGrant.isGranted(this);
+        grantWriteButton.setText(AccessLogic.grantButtonLabel(granted));
+        boolean clickable = AccessLogic.grantButtonClickable(granted);
+        grantWriteButton.setEnabled(clickable);
+        grantWriteButton.setClickable(clickable);
+    }
+    private void attemptAutoGrant() {
+        WriteSettingsGrant.attemptAutoGrantAsync(this, () -> runOnUiThread(this::refreshGrantButton));
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        refreshGrantButton();
+        attemptAutoGrant();
+    }
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         ScrollView scroll = new ScrollView(this);
@@ -76,19 +98,24 @@ public class MainActivity extends Activity {
             startForegroundService(new Intent(this, ButtonService.class));
             Toast.makeText(this, "Saved, daemon starting and publishing to Home Assistant", Toast.LENGTH_SHORT).show();
         });
-        Button grantWrite = new Button(this);
-        grantWrite.setText(android.provider.Settings.System.canWrite(this) ? "Write Settings: granted" : "Grant Write Settings (brightness / rotation)");
-        grantWrite.setOnClickListener(v -> {
-            if (android.provider.Settings.System.canWrite(this)) { Toast.makeText(this, "Write Settings already granted", Toast.LENGTH_SHORT).show(); return; }
+        grantWriteButton = new Button(this);
+        grantWriteButton.setOnClickListener(v -> {
+            if (WriteSettingsGrant.isGranted(this)) { refreshGrantButton(); return; }
             Intent i = new Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS);
             i.setData(android.net.Uri.parse("package:" + getPackageName()));
             startActivity(i);
         });
+        refreshGrantButton();
         TextView note = new TextView(this);
         note.setText("Save starts the daemon and publishes the device to Home Assistant. Without TLS, MQTT is plaintext — use it only on a trusted network.");
         root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show);
-        root.addView(tls); root.addView(wakelock); root.addView(wakescreen); root.addView(debugBox); root.addView(save); root.addView(grantWrite); root.addView(note);
+        root.addView(tls); root.addView(wakelock); root.addView(wakescreen); root.addView(debugBox); root.addView(save); root.addView(grantWriteButton); root.addView(note);
         scroll.addView(root); setContentView(scroll);
+        // On a rooted panel, try to apply the Write Settings grant
+        // via su right away; the button flips to its granted state if
+        // it lands. OnResume repeats the attempt when the screen
+        // becomes visible again.
+        attemptAutoGrant();
     }
     private EditText field(String value, String hint, int inputType, int ime) {
         EditText e = new EditText(this);

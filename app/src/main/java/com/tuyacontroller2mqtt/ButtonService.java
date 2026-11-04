@@ -319,6 +319,11 @@ public class ButtonService extends Service {
         // MQTT /rotation/set command. Runs once per start only — never
         // in pollLoop — so a deliberate rotation change is not fought.
         // If WRITE_SETTINGS is not granted, this logs and does nothing.
+        // First try to apply the grant via su (rooted panels only,
+        // fire-and-forget): if it lands, the callback re-runs the
+        // rotation check that depends on it. Without su this is a
+        // silent no-op and the check below just logs as before.
+        WriteSettingsGrant.attemptAutoGrantAsync(this, this::enforceDesiredRotation);
         enforceDesiredRotation();
         mqtt.setCommandListener((topic, payload) -> {
             try { handleCommand(topic, payload); }
@@ -368,23 +373,8 @@ public class ButtonService extends Service {
         }
     }
     // ---- su / privileged helpers ----
-    // Correct syntax on this ROM: su 0 <argv...>, no -c flag.
-    private String runSu(String... argv) {
-        try {
-            String[] cmd = new String[argv.length + 2];
-            cmd[0] = "su"; cmd[1] = "0";
-            System.arraycopy(argv, 0, cmd, 2, argv.length);
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            java.lang.Process proc = pb.start();
-            StringBuilder out = new StringBuilder();
-            BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()));
-            String line; while ((line = r.readLine()) != null) { if (out.length() > 0) out.append(" | "); out.append(line); }
-            int rc = proc.waitFor();
-            Log.i(TAG, "su " + String.join(" ", argv) + " exit=" + rc + " output=" + out);
-            return out.toString();
-        } catch (Exception e) { Log.w(TAG, "su failed: " + e); return null; }
-    }
+    // Implementation in SuExec (shared with WriteSettingsGrant).
+    private String runSu(String... argv) { return SuExec.run(argv); }
     private void wakeScreen() {
         try {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
@@ -406,7 +396,11 @@ public class ButtonService extends Service {
         if (on) { wakeScreen(); }
         else {
             if (screenWakeLock != null && screenWakeLock.isHeld()) screenWakeLock.release();
-            runSu("input", "keyevent", "26");
+            // Keyevent 26 toggles power rather than setting it: only
+            // send it while the screen is actually on, or an OFF
+            // command to an already-off panel turns the screen ON.
+            if (AccessLogic.shouldSendPowerKeyevent(false, pm.isInteractive())) runSu("input", "keyevent", "26");
+            else Log.i(TAG, "screen off requested while screen already off; power keyevent skipped");
         }
         try { Thread.sleep(600); } catch (InterruptedException ignored) {}
         try { boolean scr = pm.isInteractive(); lastScreen = scr; mqtt.screen(scr); } catch (Exception e) { Log.w(TAG, "screen publish failed: " + e); }

@@ -18,6 +18,22 @@ adopted in 1.2.0.
 
 ## [Unreleased]
 
+### Added
+
+- Write Settings auto-grant: on panels with `su`, the app applies
+  the Write Settings grant itself at start (daemon start and
+  settings screen), so brightness and rotation work without a
+  manual trip through system settings. The settings-screen button
+  now shows the live grant state — disabled and labelled
+  "Write Settings: granted" once the grant is in place — and
+  remains the manual route on panels without `su`.
+
+### Fixed
+
+- Screen off no longer sends the power keyevent when the screen is
+  already off. The keyevent toggles power, so the old unconditional
+  send turned an already-off screen back on.
+
 ### Changed
 
 - Docs: motion-vs-presence question closed. A stand-still test on
