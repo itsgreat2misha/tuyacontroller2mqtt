@@ -173,6 +173,65 @@ including mains circuits.
 - This software is provided under the MIT license with no warranty;
   you are responsible for your installation.
 
+## Troubleshooting
+
+- **No entities appear in Home Assistant.** Check that the MQTT
+  broker is reachable from the panel, that the broker host, port,
+  username and password entered in the app are correct, and that
+  Home Assistant has the MQTT integration with discovery enabled.
+  The daemon publishes discovery when it connects, and a 30-second
+  reconnect loop covers broker restarts. All entities share an
+  availability topic with a Last Will: the daemon publishes retained
+  `online` on connect, and the broker publishes retained `offline`
+  if it dies (keepalive 60 s, so detection is within ~90 s).
+- **TLS connection fails.** TLS verifies the broker's certificate
+  against the Android system trust store and checks the hostname,
+  and uses port 8883 by default. Brokers with self-signed
+  certificates are not supported; use a certificate from a CA your
+  panel trusts (public CA, or a local CA installed into the system
+  store), or keep the panel on a trusted LAN with plaintext.
+- **Brightness or rotation commands are refused or revert.** Those
+  commands require the **Write Settings** grant (offered in the
+  app's settings screen); without it the commands are refused and
+  Home Assistant reverts to the actual polled value. If you upgraded
+  from a pre-1.2.0 build, re-grant Write Settings after reinstalling
+  (see the upgrade note under Install).
+- **Screen on/off or reboot commands do not work.** Those commands
+  run through `su` where the ROM provides it, so they require root
+  (see Requirements).
+- **The daemon does not start after boot.** The daemon registers a
+  boot receiver, but some vendor ROMs (including the F5-3's) do not
+  deliver `BOOT_COMPLETED` to this app. On those ROMs, start the
+  service after boot with whatever launcher/kiosk tooling you use:
+  `am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
+- **A relay press does not behave like a switch toggle.** In
+  *momentary* relay mode the switch is retracted and only the press
+  event remains; a press that turns the relay on is snapped back off
+  by the daemon. Automations should trigger on the **press event**,
+  not on relay state.
+
+## Limitations
+
+- **Only the F5-3 is tested.** Any other model is untested and needs
+  a device profile before it can be supported (see Supported
+  devices and CONTRIBUTING.md).
+- **The F5-3 sensor is motion, not presence** — a person standing
+  very still stops being detected (verified; see Supported devices).
+- **The night light is brightness only**, with no colour control,
+  and its state is optimistic because the MCU sends no status frame
+  for it.
+- **Feature-dependent permissions:** screen on/off and reboot
+  require root (`su`); brightness and rotation require the Write
+  Settings grant. Without them, those commands do not work.
+- **MQTT authorization is the broker's job.** The daemon
+  authenticates to the broker but has no per-command authorization
+  of its own, and without TLS MQTT is plaintext (see Security).
+- **Self-signed broker certificates are not supported** for TLS
+  (see Security).
+- **Autostart depends on the ROM** delivering `BOOT_COMPLETED`;
+  ROMs that do not deliver it need an external launcher/kiosk tool
+  to start the service after boot (see Configuration).
+
 ## Build from source
 
 The project builds without Gradle, using the Android SDK
