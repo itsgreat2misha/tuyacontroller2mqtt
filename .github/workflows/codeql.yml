@@ -1,0 +1,60 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, Tuesdays 05:30 UTC.
+    - cron: "30 5 * * 2"
+
+# Least privilege at the workflow level; the analyze job grants
+# security-events: write for itself only.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (java-kotlin)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-30" "build-tools;30.0.3"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          # Script build (no Gradle): CodeQL traces the javac calls
+          # made by build.sh in the build step below.
+          build-mode: manual
+
+      # Same compile path as build.yml's non-release build check:
+      # debug signing only, no release keystore secrets involved.
+      - name: Build with build.sh
+        env:
+          ALLOW_DEBUG_SIGNING: "1"
+        run: |
+          export ANDROID_SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          sh build.sh
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:java-kotlin"
