@@ -51,7 +51,6 @@ jobs:
           ALLOW_DEBUG_SIGNING: "1"
         run: |
           export ANDROID_SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          export JAVA_HOME="$JAVA_HOME_17_X64"
           sh build.sh
 
       - name: Perform CodeQL Analysis
