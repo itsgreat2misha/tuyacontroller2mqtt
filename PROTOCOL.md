@@ -1,9 +1,10 @@
 # Serial protocol (F5-3 profile)
 
-Decoded from bus captures and confirmed against the vendor firmware's
-test utilities (`McuTestActivity`, `A485McuUtil.send()`,
-`F5SmallLightUtil`, `F5MessageSensorChange`). No vendor code is used;
-frame byte constants are functional facts of the protocol.
+This document describes the serial protocol as implemented by the
+F5-3 device profile (`DeviceProfile.F5_3`) and the frame handling in
+`ButtonService`: the frame formats, and how the daemon distinguishes
+physical presses from query batches. Frame byte constants are
+functional facts of the protocol.
 
 Port: the profile's serial device (`/dev/ttyAS2` on the F5-3) at
 115200 baud, raw. Frames are 7 bytes: `fc` … `fe`.
@@ -13,7 +14,7 @@ Port: the profile's serial device (`/dev/ttyAS2` on the F5-3) at
 | Frame | Meaning |
 |---|---|
 | `fc 00 1c 00 00 00 fe` | Motion on |
-| `fc 00 0c 00 00 00 fe` | Motion off (after ~30–60 s idle) |
+| `fc 00 0c 00 00 00 fe` | Motion off |
 | `fc 00 00 00 01 04 fe` | Button 4 (momentary) |
 | `fc 00 00 00 01 05 fe` | Button 5 |
 | `fc 00 00 00 01 06 fe` | Button 6 |
@@ -49,8 +50,7 @@ not the button LED or the actual relay. Serial writes are spaced
 are not reliably acted on otherwise.
 
 Relay 4 appears in every query batch but has no physical button and
-is not exposed as a switch. The `/proc/vendor/relay_first/second/third`
-files do **not** reflect MCU relay state.
+is not exposed as a switch.
 
 ## Press vs query batch
 
@@ -72,13 +72,3 @@ motion frame), and the eventual clear then arrives as a no-op, so
 HA-driven state sync can make panel motion sensing miss real
 walk-ins. In momentary mode nothing flips a relay remotely, so the
 only activation left coincides with a person at the panel.
-
-## Motion, not presence
-
-The F5 manual calls the sensor "Induction (Radar PIR)" and describes
-waving a hand to trigger it; vendor code calls the frames
-`F5MessageSensorChange`, not presence. The sensor detects movement
-only: it fires when a person approaches and clears after ~30–60 s
-without movement, so — unlike a presence (mmWave) sensor — it does
-not detect a stationary person. The entity is therefore exposed as
-Motion with `device_class: motion`, not Occupancy.
