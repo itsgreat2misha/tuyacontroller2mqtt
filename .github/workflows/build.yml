@@ -23,8 +23,10 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Least privilege by default. The build job re-grants contents: write
+# for itself only, because it uploads the APK to published releases.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -41,6 +43,9 @@ jobs:
 
   build:
     needs: test
+    # Uploading release assets (gh release upload) needs write.
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
