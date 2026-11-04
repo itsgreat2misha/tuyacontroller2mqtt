@@ -31,13 +31,13 @@ supporting another panel is mostly a matter of capturing its frames
 and adding a profile. Contributions are welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Motion, not presence:** the F5-3 sensor is exposed as a motion
-sensor (`device_class: motion`). No specification claims static
-presence detection, and its observed behaviour fits motion. One test
-is still open: standing still in front of the panel for over 60 s to
-check whether it stays triggered (static presence) or clears
-(motion). Until that is done the motion label should be treated as
-highly likely but not proven. Details in [PROTOCOL.md](PROTOCOL.md).
+**Motion, not presence — verified:** the F5-3 sensor is exposed as
+a motion sensor (`device_class: motion`), and that is now proven,
+not just inferred. In a stand-still test on 2026-11-03, a person
+stood very still in front of the panel: detection cleared after
+~40 seconds and the buttons turned off, and moving again re-detected
+immediately. A true presence sensor would have kept detecting the
+stationary person. Details in [PROTOCOL.md](PROTOCOL.md).
 
 ## Requirements
 
