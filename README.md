@@ -12,9 +12,7 @@ This is **not** a Tuya cloud or Tuya-local-protocol integration: it
 does not talk to Tuya end devices (bulbs, plugs, …), does not use
 device IDs or local keys, and does not connect to any Tuya service. It
 is also not affiliated with Tuya Inc.; "Tuya" is used only to describe
-the class of hardware it runs on. The serial protocol was
-reverse-engineered from bus captures and the vendor firmware's own
-test utilities; no vendor code is included in this repository.
+the class of hardware it runs on.
 
 ## Supported devices
 
@@ -23,7 +21,7 @@ MCU protocol has been captured and a device profile written":
 
 | Model | SoC | Android | Serial device | Buttons | Relays | Sensor | Night light | Status |
 |---|---|---|---|---|---|---|---|---|
-| F5-3 | Allwinner A133 | 11 | /dev/ttyAS2 @ 115200 | 8 (1–3 relay, 4–8 momentary) | 3 (+1 query-only channel) | Motion (see note) | Yes | **Tested** |
+| F5-3 | Allwinner A133 | 11 | /dev/ttyAS2 @ 115200 | 8 (1–3 relay, 4–8 momentary) | 3 (+1 query-only channel) | Motion | Yes | **Tested** |
 | Any other model | — | — | — | — | — | — | — | Untested — needs a device profile |
 
 Hardware differences live in a single `DeviceProfile` in the code, so
@@ -31,15 +29,10 @@ supporting another panel is mostly a matter of capturing its frames
 and adding a profile. Contributions are welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Motion, not presence:** the F5-3 sensor is exposed as a motion
-sensor (`device_class: motion`). It triggers on movement and clears
-after roughly 30–60 seconds without movement, so it does not detect
-a person standing still. Details in [PROTOCOL.md](PROTOCOL.md).
-
 ## Requirements
 
 - A supported panel (see table) running Android 11 (minSdk 21; the
-  tested device runs Android 11).
+  F5-3 runs Android 11).
 - An MQTT broker, and for the Home Assistant entities, Home
   Assistant with the MQTT integration and discovery enabled.
 - The serial device readable/writable by the app (on the F5-3 it is
@@ -65,29 +58,35 @@ a person standing still. Details in [PROTOCOL.md](PROTOCOL.md).
    entities appear in Home Assistant without any button press.
    A 30-second reconnect loop covers broker restarts.
 
-> **Upgrading from a pre-1.2.0 build (`com.misha.f5daemon`):** the
-> application package was renamed to `com.tuyacontroller2mqtt` in
-> 1.2.0. Android treats the renamed app as a *different* app, so you
-> must uninstall the old app and install the new one, then re-enter
-> your MQTT settings (they do not transfer) and re-grant Write
-> Settings. Home Assistant is **not** affected: MQTT topics,
-> unique_ids and the device slug are unchanged, so entities, history
-> and automations carry over. If you used an external autostart
-> mechanism that starts the service by component name, update it to
-> `com.tuyacontroller2mqtt/.ButtonService`.
-
 ## Configuration
 
-Settings live in the app's settings screen on the panel and are stored
-on-device only — broker credentials are never in this repository. The
-MQTT password is stored AES/GCM-encrypted with a key in the Android
-Keystore; only ciphertext is kept in the app's preferences (note that
-on a rooted panel this protects against casual exposure, not against
-root itself).
+Settings are stored in the app's on-device preferences. They fall
+into three groups, by where each one can be set:
 
-Options, available in both the app and Home Assistant (same settings):
+### Setup — in the app only
 
-- **Use TLS** — MQTT over TLS with certificate verification (below).
+These are entered on the app's settings screen and are not exposed
+to Home Assistant or MQTT:
+
+- **Device name** — becomes the Home Assistant device name and the
+  MQTT topic slug.
+- **MQTT host**, **MQTT port**, **MQTT username**, **MQTT password**.
+- **Use TLS** — MQTT over TLS with certificate verification (see
+  Security). Enabling it swaps a port field still holding the other
+  mode's well-known default (1883 ↔ 8883).
+
+The MQTT password is stored AES/GCM-encrypted with a key in the
+Android Keystore; only ciphertext is kept in the app's preferences
+(note that on a rooted panel this protects against casual exposure,
+not against root itself).
+
+### Options — in the app and in Home Assistant
+
+These three checkboxes on the app's settings screen are the same
+settings as the corresponding Home Assistant switches: changing one
+in either place updates the same on-device preference, and the
+daemon publishes the current state to Home Assistant.
+
 - **Wake Lock** (on by default) — holds a partial wake lock so the
   panel can turn its display off without suspending serial reading.
 - **Wake Screen on button press** (on by default; buttons only, not
@@ -95,6 +94,15 @@ Options, available in both the app and Home Assistant (same settings):
 - **Debug** (off by default) — writes rotating diagnostic logs
   (serial frames, metrics, events) to the app's private storage,
   hard-capped at 30 MB total.
+
+### Runtime configuration — in Home Assistant only
+
+- **Relay N Mode** — a per-relay `select` in Home Assistant
+  (`relay` or `momentary`; see "On the F5-3" below). There is no
+  control for it in the app; the chosen mode is stored on-device.
+
+The remaining Home Assistant entities are controls and state, not
+settings; they are listed under Home Assistant entities below.
 
 Autostart: the daemon registers a boot receiver and starts itself
 after boot on ROMs that deliver `BOOT_COMPLETED`. Some vendor ROMs
@@ -104,9 +112,19 @@ the service after boot with whatever launcher/kiosk tooling you use:
 
 ## Home Assistant entities (MQTT discovery)
 
-Per panel, under the device named after the panel. The F5-3 has
-eight physical buttons: buttons 1–3 switch relays 1–3, and buttons
-4–8 are momentary-only.
+On connect, the daemon publishes MQTT discovery configuration for
+one device, named after the panel's device name. All entities share
+an availability topic with a Last Will: the daemon publishes
+retained `online` on connect, the broker publishes retained
+`offline` if it dies (keepalive 60 s, so detection is within ~90 s),
+and tracked states are re-published every 5 s so a lost message heals
+within one poll tick.
+
+### On the F5-3
+
+The F5-3 profile exposes the following entities. The F5-3 has eight
+physical buttons: buttons 1–3 switch relays 1–3, and buttons 4–8 are
+momentary-only.
 
 - `event` Button 4–8 — physical press events (the momentary-only
   buttons).
@@ -116,7 +134,7 @@ eight physical buttons: buttons 1–3 switch relays 1–3, and buttons
 - `select` Relay N Mode — `relay` (default) or `momentary`. In
   momentary mode the switch is retracted and only the press event
   remains; a press that turns the relay on is snapped back off by the
-  daemon. Intended for buttons whose relay carries no load (below).
+  daemon.
 - `binary_sensor` Motion — also published on any physical button
   press (a press can land before the sensor's own trigger); the
   panel's clear frame ends the episode.
@@ -128,12 +146,6 @@ eight physical buttons: buttons 1–3 switch relays 1–3, and buttons
   `switch` Speaker Mute.
 - `switch` Wake Lock / Wake Screen with Button / Debug — the daemon
   options above.
-
-All entities share an availability topic with a Last Will: the daemon
-publishes retained `online` on connect, the broker publishes retained
-`offline` if it dies (keepalive 60 s, so detection is within ~90 s),
-and tracked states are re-published every 5 s so a lost message heals
-within one poll tick.
 
 ## Security
 
@@ -158,21 +170,6 @@ Read this before exposing the daemon beyond a trusted network:
   it: on a rooted panel this daemon is a root-capable agent. Install
   it only on panels you control.
 
-## ⚠️ Safety — relays switch real loads
-
-The relays on these panels can be wired to real electrical loads,
-including mains circuits.
-
-- Only connect loads within the relay's rated voltage/current, and
-  have mains wiring done or checked by a qualified electrician.
-- Treat every relay as live-capable even when a button is used
-  "virtually": a software command, an automation, or anyone with
-  broker access can energize it at any time (see Security).
-- If a button is purely virtual (no load connected), consider
-  *momentary* mode for its relay, which prevents remote flips.
-- This software is provided under the MIT license with no warranty;
-  you are responsible for your installation.
-
 ## Troubleshooting
 
 - **No entities appear in Home Assistant.** Check that the MQTT
@@ -193,9 +190,7 @@ including mains circuits.
 - **Brightness or rotation commands are refused or revert.** Those
   commands require the **Write Settings** grant (offered in the
   app's settings screen); without it the commands are refused and
-  Home Assistant reverts to the actual polled value. If you upgraded
-  from a pre-1.2.0 build, re-grant Write Settings after reinstalling
-  (see the upgrade note under Install).
+  Home Assistant reverts to the actual polled value.
 - **Screen on/off or reboot commands do not work.** Those commands
   run through `su` where the ROM provides it, so they require root
   (see Requirements).
@@ -215,10 +210,6 @@ including mains circuits.
 - **Only the F5-3 is tested.** Any other model is untested and needs
   a device profile before it can be supported (see Supported
   devices and CONTRIBUTING.md).
-- **The F5-3 sensor is motion, not presence** — it triggers on
-  movement and clears after roughly 30–60 seconds without movement,
-  so a person standing still is not detected (see Supported
-  devices).
 - **The night light is brightness only**, with no colour control,
   and its state is optimistic because the MCU sends no status frame
   for it.
@@ -259,13 +250,12 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## More documentation
 
-- [PROTOCOL.md](PROTOCOL.md) — the decoded serial protocol, press vs
-  query-batch discernment, and the motion sensor behaviour.
+- [PROTOCOL.md](PROTOCOL.md) — the decoded serial protocol and
+  press vs query-batch discernment.
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — including how to contribute a
   device profile for another panel model.
 
 ## License
 
-MIT. The serial protocol was reverse-engineered from captures and
-vendor firmware behaviour; no vendor code is included.
+MIT.
