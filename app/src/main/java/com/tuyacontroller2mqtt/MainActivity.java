@@ -85,7 +85,7 @@ public class MainActivity extends Activity {
             startActivity(i);
         });
         TextView note = new TextView(this);
-        note.setText("After Save, the daemon connects to MQTT immediately and publishes discovery, so the entities should appear in Home Assistant without pressing a button first. Without TLS the MQTT connection is plaintext: only use it on a network you trust (see the Security section of the README). Turning off the wake lock lets the panel suspend, which stops serial reading until it wakes. Screen brightness and rotation need Write Settings (button above, granted once in Android Settings); without it, HA commands for those two are refused and HA reverts to the actual value. Screen on/off and reboot use su where the ROM provides it; volume uses AudioManager.");
+        note.setText("Save starts the daemon and publishes the device to Home Assistant. Without TLS, MQTT is plaintext — use it only on a trusted network.");
         root.addView(name); root.addView(host); root.addView(port); root.addView(user); root.addView(pass); root.addView(show);
         root.addView(tls); root.addView(wakelock); root.addView(wakescreen); root.addView(debugBox); root.addView(save); root.addView(grantWrite); root.addView(note);
         scroll.addView(root); setContentView(scroll);
