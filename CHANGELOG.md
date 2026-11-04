@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions follow one rule: `versionName` in `app/build.gradle` is the
 source of truth and always equals the git tag and GitHub release
 name (`v<versionName>`); `versionCode` increases by 1 on every
-release (v1.0.0 = 1, v1.0.1 = 2, v1.1.0 = 3, v1.2.0 = 4).
+release (v1.0.0 = 1, v1.0.1 = 2, v1.1.0 = 3, v1.2.0 = 4, v1.2.1 = 5).
 
 Note on old versions: although the tags below exist, every build up
 to v1.1.0 reported `versionName 1.0` / `versionCode 1` in-app — the
@@ -17,6 +17,8 @@ reconstructed for this changelog when the discipline above was
 adopted in 1.2.0.
 
 ## [Unreleased]
+
+## [1.2.1] - 2026-11-04
 
 ### Added
 
