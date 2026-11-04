@@ -1,9 +1,14 @@
 plugins { id 'com.android.application' }
 android {
+    // Version discipline: versionName here is the single source of
+    // truth and must equal the git tag / GitHub release name
+    // (v<versionName>); versionCode increments by 1 on every release
+    // and never repeats or goes backwards (v1.0.0=1, v1.0.1=2,
+    // v1.1.0=3, v1.2.0=4). See CHANGELOG.md.
     compileSdk 30
-    defaultConfig { applicationId "com.misha.f5daemon"; minSdk 21; targetSdk 30; versionCode 1; versionName "1.0" }
+    defaultConfig { applicationId "com.tuyacontroller2mqtt"; minSdk 21; targetSdk 30; versionCode 4; versionName "1.2.0" }
     buildTypes { release { minifyEnabled false } }
-    namespace "com.misha.f5daemon"
+    namespace "com.tuyacontroller2mqtt"
 }
 dependencies {
     // No MQTT library: raw MQTT 3.1.1 client in MqttPublisher.java.
