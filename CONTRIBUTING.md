@@ -49,3 +49,7 @@ migration story in the PR:
 - Comments should explain the current design timelessly; incident
   history belongs in the changelog / git log, not in dated comment
   diaries.
+
+## AI involvement
+
+This project's development uses AI-agent assistance. Every change is reviewed by the repository owner, who remains the responsible human for the project.
