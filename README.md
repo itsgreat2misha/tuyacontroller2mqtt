@@ -1,7 +1,7 @@
 # tuyacontroller2mqtt
 
 An Android daemon for **Tuya smart home central-control panels** — the
-wall-mounted Android controllers (such as the F5-3) whose physical
+wall-mounted Android controllers whose physical
 buttons, relays and sensors are wired to an internal MCU rather than to
 Android itself. The daemon reads the MCU's serial bus directly and
 bridges the panel to **MQTT**, with Home Assistant MQTT discovery, so
@@ -31,12 +31,9 @@ and adding a profile. Contributions are welcome — see
 
 ## Requirements
 
-- A supported panel (see table) running Android 11 (minSdk 21; the
-  F5-3 runs Android 11).
+- A supported panel (see Supported devices).
 - An MQTT broker, and for the Home Assistant entities, Home
   Assistant with the MQTT integration and discovery enabled.
-- The serial device readable/writable by the app (on the F5-3 it is
-  world read/write, so no root is needed for the core functions).
 - Optional, feature-dependent:
   - **root (su)** for screen on/off and reboot commands;
   - the **Write Settings** grant for brightness and rotation
@@ -100,7 +97,7 @@ daemon publishes the current state to Home Assistant.
 ### Runtime configuration — in Home Assistant only
 
 - **Relay N Mode** — a per-relay `select` in Home Assistant
-  (`relay` or `momentary`; see "On the F5-3" below). There is no
+  (`relay` or `momentary`; see "Entities" below). There is no
   control for it in the app; the chosen mode is stored on-device.
 
 The remaining Home Assistant entities are controls and state, not
@@ -108,8 +105,8 @@ settings; they are listed under Home Assistant entities below.
 
 Autostart: the daemon registers a boot receiver and starts itself
 after boot on ROMs that deliver `BOOT_COMPLETED`. Some vendor ROMs
-(including the F5-3's) do not deliver it to this app; on those, start
-the service after boot with whatever launcher/kiosk tooling you use:
+do not deliver it to this app; on those, start the service after
+boot with whatever launcher/kiosk tooling you use:
 `am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
 
 ## Home Assistant entities (MQTT discovery)
@@ -122,15 +119,15 @@ retained `online` on connect, the broker publishes retained
 and tracked states are re-published every 5 s so a lost message heals
 within one poll tick.
 
-### On the F5-3
+### Entities
 
-The F5-3 profile exposes the following entities. The F5-3 has eight
-physical buttons: buttons 1–3 switch relays 1–3, and buttons 4–8 are
-momentary-only.
+The daemon publishes the following entities. The button and relay
+numbering comes from the device profile — see Supported devices
+for the numbering and counts on each model.
 
-- `event` Button 4–8 — physical press events (the momentary-only
+- `event` Button N — physical press events (the momentary-only
   buttons).
-- `switch` Relay 1–3 — relay state, with `event` Relay N press for
+- `switch` Relay N — relay state, with `event` Relay N press for
   physical presses. Automations should trigger on the **press event**,
   not on relay state (see PROTOCOL.md for why).
 - `select` Relay N Mode — `relay` (default) or `momentary`. In
@@ -199,9 +196,9 @@ Read this before exposing the daemon beyond a trusted network:
   run through `su` where the ROM provides it, so they require root
   (see Requirements).
 - **The daemon does not start after boot.** The daemon registers a
-  boot receiver, but some vendor ROMs (including the F5-3's) do not
-  deliver `BOOT_COMPLETED` to this app. On those ROMs, start the
-  service after boot with whatever launcher/kiosk tooling you use:
+  boot receiver, but some vendor ROMs do not deliver
+  `BOOT_COMPLETED` to this app. On those ROMs, start the service
+  after boot with whatever launcher/kiosk tooling you use:
   `am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
 - **A relay press does not behave like a switch toggle.** In
   *momentary* relay mode the switch is retracted and only the press
@@ -211,9 +208,10 @@ Read this before exposing the daemon beyond a trusted network:
 
 ## Limitations
 
-- **Only the F5-3 is tested.** Any other model is untested and needs
-  a device profile before it can be supported (see Supported
-  devices and CONTRIBUTING.md).
+- **Only the models marked as Tested in Supported devices are
+  tested.** Any other model is untested and needs a device profile
+  before it can be supported (see Supported devices and
+  CONTRIBUTING.md).
 - **The night light is brightness only**, with no colour control,
   and its state is optimistic because the MCU sends no status frame
   for it.
