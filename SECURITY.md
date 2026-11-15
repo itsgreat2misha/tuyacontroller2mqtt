@@ -5,10 +5,10 @@
 Please report security issues privately via GitHub's
 **Report a vulnerability** button (Security → Advisories) on this
 repository, rather than opening a public issue. Include the affected
-version, the panel model, and steps to reproduce. You should get a
-response within a week; fixes are released as new versions (there is
-no update mechanism in the app itself, so please watch releases if
-you run this daemon).
+version, the panel model, and steps to reproduce. Reports are
+reviewed on a best-effort basis; fixes are released as new
+versions (there is no update mechanism in the app itself, so
+please watch releases if you run this daemon).
 
 ## Security model (summary)
 
