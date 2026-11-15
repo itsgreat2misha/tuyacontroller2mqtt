@@ -1,0 +1,7 @@
+# CodeRabbit trial configuration: automatic reviews on, nothing else.
+# The trial starts with the first pull request after the CodeRabbit
+# GitHub App is installed on this repository.
+language: "en-US"
+reviews:
+  auto_review:
+    enabled: true

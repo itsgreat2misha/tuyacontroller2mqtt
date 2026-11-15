@@ -1,0 +1,30 @@
+name: Zizmor
+
+# Audits the workflow files themselves (normal mode) whenever they
+# change. zizmor is pinned; Dependabot does not track pip installs
+# in run steps, so bump the pin deliberately.
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/**"]
+  pull_request:
+    paths: [".github/workflows/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Workflow audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: python3 -m pip install "zizmor==1.16.0"
+
+      - name: Audit workflows
+        run: zizmor --format plain .github/workflows/
