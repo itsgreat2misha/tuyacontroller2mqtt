@@ -7,6 +7,8 @@ Android itself. The daemon reads the MCU's serial bus directly and
 bridges the panel to **MQTT**, with Home Assistant MQTT discovery, so
 the panel's buttons and relays become ordinary Home Assistant entities.
 No Tuya cloud account, vendor app, or internet connection is involved.
+The MCU protocol was reverse-engineered from the panel's own traffic;
+no vendor code is included.
 
 This is **not** a Tuya cloud or Tuya-local-protocol integration: it
 does not talk to Tuya end devices (bulbs, plugs, …), does not use
@@ -24,6 +26,11 @@ MCU protocol has been captured and a device profile written":
 | F5-3 | Allwinner A133 | 11 | /dev/ttyAS2 @ 115200 | 8 (1–3 relay, 4–8 momentary) | 3 (+1 query-only channel) | Motion | Yes | **Tested** |
 | Any other model | — | — | — | — | — | — | — | Untested — needs a device profile |
 
+"Momentary" buttons only register a press; they are not wired to a
+relay. The "+1 query-only channel" is a fourth relay channel that
+appears only in the panel's status replies: it has no physical
+button and is not exposed as an entity.
+
 Hardware differences live in a single `DeviceProfile` in the code, so
 supporting another panel is mostly a matter of capturing its frames
 and adding a profile. Contributions are welcome — see
@@ -32,10 +39,14 @@ and adding a profile. Contributions are welcome — see
 ## Requirements
 
 - A supported panel (see Supported devices).
-- An MQTT broker, and for the Home Assistant entities, Home
-  Assistant with the MQTT integration and discovery enabled.
+- An MQTT broker. Home Assistant is not required to use the bridge —
+  state and commands are plain MQTT topics (see MQTT topics below).
+  For the Home Assistant entities, Home Assistant with the MQTT
+  integration and discovery enabled.
 - Optional, feature-dependent:
-  - **root (su)** for screen on/off and reboot commands;
+  - **root (su)** for screen off and reboot commands. Turning the
+    screen on first tries a wake lock, which needs no root, and
+    uses `su` only as a fallback;
   - the **Write Settings** grant for brightness and rotation
     commands; without it those commands are refused and Home
     Assistant reverts to the actual polled value. On a panel with
@@ -46,16 +57,30 @@ and adding a profile. Contributions are welcome — see
 ## Install
 
 1. Download `tuyacontroller2mqtt.apk` (and its `.sha256`) from the
-   [latest release](../../releases/latest) and verify the checksum.
+   [latest release](../../releases/latest) and verify the checksum:
+   `sha256sum -c tuyacontroller2mqtt.apk.sha256`.
 2. Install it on the panel, e.g. `adb install tuyacontroller2mqtt.apk`
-   or copy it over and open it.
+   (this needs USB debugging, under developer options, enabled on
+   the panel), or copy the APK to the panel and open it there,
+   allowing the install if Android asks.
 3. Open the app, enter your MQTT broker host, port, username and
-   password, choose TLS or plaintext (see Security), set the device
-   name (this becomes the Home Assistant device name; give every
-   panel a distinct name), and tap **Save and start daemon**.
-4. The daemon connects immediately and publishes discovery, so the
-   entities appear in Home Assistant without any button press.
+   password, set the device name (this becomes the Home Assistant
+   device name; give every panel a distinct name), choose TLS or
+   plaintext, and tap **Save and start daemon**. The short version
+   of the TLS choice: without TLS the broker password and every
+   command travel in cleartext, and anyone who can publish to the
+   broker can operate the panel — enable TLS unless the broker is
+   on a fully trusted, isolated LAN (see Security).
+4. Check that it connected: the daemon connects immediately and
+   publishes discovery, so the panel's device appears in Home
+   Assistant with its entities available, without any button press.
    A 30-second reconnect loop covers broker restarts.
+5. Make it survive a reboot: the daemon registers a boot receiver
+   and starts itself after boot on ROMs that deliver
+   `BOOT_COMPLETED`. Some vendor ROMs do not deliver it to this app;
+   on those, start the service after boot with whatever
+   launcher/kiosk tooling you use:
+   `am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
 
 ## Configuration
 
@@ -71,8 +96,8 @@ to Home Assistant or MQTT:
   MQTT topic slug.
 - **MQTT host**, **MQTT port**, **MQTT username**, **MQTT password**.
 - **Use TLS** — MQTT over TLS with certificate verification (see
-  Security). Enabling it swaps a port field still holding the other
-  mode's well-known default (1883 ↔ 8883).
+  Security). If the port field still holds the other mode's
+  default, enabling or disabling TLS swaps it (1883 ↔ 8883).
 
 The MQTT password is stored AES/GCM-encrypted with a key in the
 Android Keystore; only ciphertext is kept in the app's preferences
@@ -96,28 +121,35 @@ daemon publishes the current state to Home Assistant.
 
 ### Runtime configuration — in Home Assistant only
 
-- **Relay N Mode** — a per-relay `select` in Home Assistant
-  (`relay` or `momentary`; see "Entities" below). There is no
-  control for it in the app; the chosen mode is stored on-device.
+One setting lives only in Home Assistant: **Relay N Mode** — see
+Entities below. There is no control for it in the app; the chosen
+mode is stored on-device.
 
 The remaining Home Assistant entities are controls and state, not
 settings; they are listed under Home Assistant entities below.
 
-Autostart: the daemon registers a boot receiver and starts itself
-after boot on ROMs that deliver `BOOT_COMPLETED`. Some vendor ROMs
-do not deliver it to this app; on those, start the service after
-boot with whatever launcher/kiosk tooling you use:
-`am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
+### MQTT topics
+
+All topics sit under `tuyacontroller/<device-slug>/`, where the slug
+is the device name lowercased, with runs of non-alphanumeric
+characters replaced by `_` (for example, a panel named
+"Entryway assistant" publishes under
+`tuyacontroller/entryway_assistant/`). State appears on topics such
+as `…/motion`, `…/relay/1` and `…/screen/state`; commands go to the
+matching topic with `/set` appended (for example, publish `ON` to
+`…/relay/1/set`), and reboot is `…/reboot/press` with payload
+`PRESS`. The daemon also publishes its availability to
+`…/availability` (see Entities).
 
 ## Home Assistant entities (MQTT discovery)
 
 On connect, the daemon publishes MQTT discovery configuration for
 one device, named after the panel's device name. All entities share
-an availability topic with a Last Will: the daemon publishes
-retained `online` on connect, the broker publishes retained
-`offline` if it dies (keepalive 60 s, so detection is within ~90 s),
-and tracked states are re-published every 5 s so a lost message heals
-within one poll tick.
+an availability topic: the daemon publishes retained `online` to it
+on connect, and if the daemon stops responding the broker publishes
+retained `offline` (the daemon checks in every 60 s, so this is
+detected within about 90 s). Tracked states are re-published every
+5 s, so a lost message heals on its own.
 
 ### Entities
 
@@ -131,9 +163,11 @@ for the numbering and counts on each model.
   physical presses. Automations should trigger on the **press event**,
   not on relay state (see PROTOCOL.md for why).
 - `select` Relay N Mode — `relay` (default) or `momentary`. In
-  momentary mode the switch is retracted and only the press event
-  remains; a press that turns the relay on is snapped back off by the
-  daemon.
+  relay mode the relay is an ordinary switch that stays as it is
+  set. In momentary mode the switch is retracted and only the press
+  event remains; a press that turns the relay on is snapped back
+  off by the daemon. Use momentary mode for a relay that should
+  only pulse, never stay on.
 - `binary_sensor` Motion — also published on any physical button
   press (a press can land before the sensor's own trigger); the
   panel's clear frame ends the episode.
@@ -165,7 +199,7 @@ Read this before exposing the daemon beyond a trusted network:
   self-signed certificates are not supported; use a certificate from
   a CA your panel trusts (public CA, or a local CA installed into the
   system store), or keep the panel on a trusted LAN with plaintext.
-- Screen on/off and reboot run through `su` where the ROM provides
+- Screen off and reboot run through `su` where the ROM provides
   it: on a rooted panel this daemon is a root-capable agent. Install
   it only on panels you control.
 
@@ -175,36 +209,28 @@ Read this before exposing the daemon beyond a trusted network:
   broker is reachable from the panel, that the broker host, port,
   username and password entered in the app are correct, and that
   Home Assistant has the MQTT integration with discovery enabled.
-  The daemon publishes discovery when it connects, and a 30-second
-  reconnect loop covers broker restarts. All entities share an
-  availability topic with a Last Will: the daemon publishes retained
-  `online` on connect, and the broker publishes retained `offline`
-  if it dies (keepalive 60 s, so detection is within ~90 s).
-- **TLS connection fails.** TLS verifies the broker's certificate
-  against the Android system trust store and checks the hostname,
-  and uses port 8883 by default. Brokers with self-signed
-  certificates are not supported; use a certificate from a CA your
-  panel trusts (public CA, or a local CA installed into the system
-  store), or keep the panel on a trusted LAN with plaintext.
+  If the panel's device is in Home Assistant but shows unavailable,
+  the daemon is not connected — see the availability topic under
+  Home Assistant entities.
+- **TLS connection fails.** Check that the broker's certificate
+  chains to a CA in the Android system trust store and that its
+  hostname matches the name you entered; self-signed certificates
+  are not supported (see Security).
 - **Brightness or rotation commands are refused or revert.** Those
   commands require the **Write Settings** grant. With `su` the app
   grants it to itself at start; without `su`, grant it from the
   button in the app's settings screen — if the button reads
   "Write Settings: granted" the grant is in place and something
   else is wrong.
-- **Screen on/off or reboot commands do not work.** Those commands
-  run through `su` where the ROM provides it, so they require root
-  (see Requirements).
-- **The daemon does not start after boot.** The daemon registers a
-  boot receiver, but some vendor ROMs do not deliver
-  `BOOT_COMPLETED` to this app. On those ROMs, start the service
-  after boot with whatever launcher/kiosk tooling you use:
-  `am start-foreground-service -n com.tuyacontroller2mqtt/.ButtonService`.
-- **A relay press does not behave like a switch toggle.** In
-  *momentary* relay mode the switch is retracted and only the press
-  event remains; a press that turns the relay on is snapped back off
-  by the daemon. Automations should trigger on the **press event**,
-  not on relay state.
+- **Screen off or reboot commands do not work.** Those commands
+  run through `su`, so they require root (see Requirements).
+  Turning the screen on does not: it uses a wake lock first.
+- **The daemon does not start after boot.** Start the service with
+  the command in Install step 5, using whatever launcher/kiosk
+  tooling you use.
+- **A relay press does not behave like a switch toggle.** Check
+  the relay's mode: in *momentary* mode there is no switch to
+  toggle, only the press event (see Entities).
 
 ## Limitations
 
@@ -215,18 +241,6 @@ Read this before exposing the daemon beyond a trusted network:
 - **The night light is brightness only**, with no colour control,
   and its state is optimistic because the MCU sends no status frame
   for it.
-- **Feature-dependent permissions:** screen on/off and reboot
-  require root (`su`); brightness and rotation require the Write
-  Settings grant (applied by the app itself when `su` is present).
-  Without them, those commands do not work.
-- **MQTT authorization is the broker's job.** The daemon
-  authenticates to the broker but has no per-command authorization
-  of its own, and without TLS MQTT is plaintext (see Security).
-- **Self-signed broker certificates are not supported** for TLS
-  (see Security).
-- **Autostart depends on the ROM** delivering `BOOT_COMPLETED`;
-  ROMs that do not deliver it need an external launcher/kiosk tool
-  to start the service after boot (see Configuration).
 
 ## Build from source
 

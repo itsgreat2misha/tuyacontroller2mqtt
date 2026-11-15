@@ -18,6 +18,30 @@ adopted in 1.2.0.
 
 ## [Unreleased]
 
+### Changed
+
+- README: references to the one tested model were removed outside
+  the Supported devices table, so the text describes any supported
+  panel, and the README was reorganized — autostart is now the last
+  Install step, the TLS choice is explained where it is made, each
+  fact is stated in one place, and the MQTT topic pattern is
+  documented.
+- Relay commands are now limited to the relays in the device
+  profile (a publish to a relay the panel does not expose, such as
+  the query-only channel, is ignored); the per-relay mode array is
+  sized from the profile.
+- The *Use TLS* checkbox in the app now says "default port 8883";
+  the port field has always accepted any port.
+
+### Removed
+
+- The unused `id` field from `DeviceProfile`, and the root Gradle
+  files (`build.gradle`, `settings.gradle`) that described a build
+  that never runs — `build.sh` is the build, and `app/build.gradle`
+  remains the version source of truth. The night light is now only
+  published, and only answers commands, on profiles that support
+  it (no change on the F5-3, which does).
+
 ## [1.2.1] - 2026-11-04
 
 ### Added
@@ -35,14 +59,6 @@ adopted in 1.2.0.
 - Screen off no longer sends the power keyevent when the screen is
   already off. The keyevent toggles power, so the old unconditional
   send turned an already-off screen back on.
-
-### Changed
-
-- Docs: motion-vs-presence question closed. A stand-still test on
-  2026-11-03 (detection cleared after ~40 s with a person standing
-  very still in front of the panel) confirmed the F5-3 sensor is
-  motion, not presence; the `device_class: motion` naming is
-  verified correct.
 
 ## [1.2.0] - 2026-11-04
 
@@ -68,9 +84,7 @@ adopted in 1.2.0.
   MQTT settings; Home Assistant topics/unique_ids are unchanged.
 - **Release signing**: release builds now require the project release
   keystore and fail loudly without it; no more silent debug-key
-  signing. Release signing is configured: the dedicated release
-  keystore and all four CI signing secrets were set up on
-  2026-11-03, so signed release builds can be published.
+  signing.
 - README rewritten as user documentation; protocol detail moved to
   PROTOCOL.md.
 
