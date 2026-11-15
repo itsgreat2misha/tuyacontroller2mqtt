@@ -58,7 +58,8 @@ and adding a profile. Contributions are welcome — see
 
 1. Download `tuyacontroller2mqtt.apk` (and its `.sha256`) from the
    [latest release](../../releases/latest) and verify the checksum:
-   `sha256sum -c tuyacontroller2mqtt.apk.sha256`.
+   run `sha256sum tuyacontroller2mqtt.apk` and check that the
+   output matches the contents of the `.sha256` file.
 2. Install it on the panel, e.g. `adb install tuyacontroller2mqtt.apk`
    (this needs USB debugging, under developer options, enabled on
    the panel), or copy the APK to the panel and open it there,
@@ -132,13 +133,14 @@ settings; they are listed under Home Assistant entities below.
 
 All topics sit under `tuyacontroller/<device-slug>/`, where the slug
 is the device name lowercased, with runs of non-alphanumeric
-characters replaced by `_` (for example, a panel named
-"Entryway assistant" publishes under
+characters replaced by `_` and leading/trailing underscores dropped
+(for example, a panel named "Entryway assistant" publishes under
 `tuyacontroller/entryway_assistant/`). State appears on topics such
-as `…/motion`, `…/relay/1` and `…/screen/state`; commands go to the
-matching topic with `/set` appended (for example, publish `ON` to
-`…/relay/1/set`), and reboot is `…/reboot/press` with payload
-`PRESS`. The daemon also publishes its availability to
+as `…/motion`, `…/relay/1` and `…/screen/state`; each control has a
+command topic of the same shape — for a relay it is the state topic
+with `/set` appended (publish `ON` to `…/relay/1/set`), for the
+screen it is `…/screen/set` — and reboot is `…/reboot/press` with
+payload `PRESS`. The daemon also publishes its availability to
 `…/availability` (see Entities).
 
 ## Home Assistant entities (MQTT discovery)
