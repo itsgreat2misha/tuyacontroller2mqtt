@@ -736,7 +736,7 @@ public class ButtonService extends Service {
             if (force) {
                 boolean nlOn = p.getBoolean("nightlight_on", false);
                 int nlB = p.getInt("nightlight_brightness", 50);
-                mqtt.nightLight(nlOn, nlB);
+                if (profile.nightLightSupported) mqtt.nightLight(nlOn, nlB);
                 // QoS 0 state messages can be lost; re-publishing the
                 // tracked states every poll heals a stale HA entity
                 // within one poll tick instead of waiting for a change.
