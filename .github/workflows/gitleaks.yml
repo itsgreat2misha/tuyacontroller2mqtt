@@ -5,6 +5,8 @@ name: Gitleaks
 # verified) rather than the action, so no license key is involved.
 # The playbook asks for a dedicated scanner run for the record; this
 # makes it continuous.
+# Pin note: v8.30.1 is the latest upstream gitleaks release (checked
+# 2026-11-15); when bumping, update the version and checksum together.
 
 on:
   push:
