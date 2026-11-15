@@ -36,11 +36,11 @@ public class MqttPublisher {
     // exposed), true = momentary mode (switch discovery retracted,
     // only the press event remains). Set by the service from prefs
     // before connect and on every mode change; publishDiscovery and
-    // publishRelaySwitchDiscovery read it. Relays 1-3 only (index 0
-    // unused; relay 4 is a query-only channel with no switch).
-    private final boolean[] relayMomentary = new boolean[5];
-    public void setRelayMomentary(int relay, boolean momentary) { if (relay >= 1 && relay <= 4) relayMomentary[relay] = momentary; }
-    public boolean relayMomentary(int relay) { return relay >= 1 && relay <= 4 && relayMomentary[relay]; }
+    // publishRelaySwitchDiscovery read it. Sized from the profile
+    // (index 0 unused).
+    private final boolean[] relayMomentary = new boolean[profile.relayCount + 1];
+    public void setRelayMomentary(int relay, boolean momentary) { if (profile.hasRelay(relay)) relayMomentary[relay] = momentary; }
+    public boolean relayMomentary(int relay) { return profile.hasRelay(relay) && relayMomentary[relay]; }
     public void setCommandListener(CommandListener l) { listener = l; }
     public static String slug(String name) { return MqttTopics.slug(name); }
     public String topicRoot() { return root; }
@@ -208,8 +208,10 @@ public class MqttPublisher {
         // Night light: MCU side LED bar, brightness only, no colour
         // (the vendor API has setSwitch + setBright 0-100, no colour).
         // State is optimistic: the MCU sends no status frame for it.
-        String ncfg = "{\"name\":\"Night Light\",\"unique_id\":\"" + slug + "_night_light\",\"state_topic\":\"" + root + "/nightlight/state\",\"command_topic\":\"" + root + "/nightlight/set\",\"brightness_state_topic\":\"" + root + "/nightlight/brightness\",\"brightness_command_topic\":\"" + root + "/nightlight/brightness/set\",\"brightness_scale\":100,\"payload_on\":\"ON\",\"payload_off\":\"OFF\"," + avail + dev + "}";
-        doPublish("homeassistant/light/" + slug + "_night_light/config", ncfg, true);
+        if (profile.nightLightSupported) {
+            String ncfg = "{\"name\":\"Night Light\",\"unique_id\":\"" + slug + "_night_light\",\"state_topic\":\"" + root + "/nightlight/state\",\"command_topic\":\"" + root + "/nightlight/set\",\"brightness_state_topic\":\"" + root + "/nightlight/brightness\",\"brightness_command_topic\":\"" + root + "/nightlight/brightness/set\",\"brightness_scale\":100,\"payload_on\":\"ON\",\"payload_off\":\"OFF\"," + avail + dev + "}";
+            doPublish("homeassistant/light/" + slug + "_night_light/config", ncfg, true);
+        }
         // Removed entities (Music Mute, Audio Source, Horn): publish
         // empty discovery so HA removes them from upgraded installs.
         doPublish("homeassistant/switch/" + slug + "_volume_mute/config", "", true);

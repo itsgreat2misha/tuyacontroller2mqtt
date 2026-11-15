@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
             pass.setTransformationMethod(checked ? null : android.text.method.PasswordTransformationMethod.getInstance());
             pass.setSelection(pass.getText().length());
         });
-        CheckBox tls = new CheckBox(this); tls.setText("Use TLS (MQTT over TLS, port 8883; broker certificate is verified)");
+        CheckBox tls = new CheckBox(this); tls.setText("Use TLS (MQTT over TLS, certificate verified; default port 8883)");
         tls.setChecked(tlsSaved);
         tls.setOnCheckedChangeListener((v, checked) -> {
             // Convenience only: when the port field still holds the
