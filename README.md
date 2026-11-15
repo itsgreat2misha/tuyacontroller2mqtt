@@ -146,18 +146,12 @@ payload `PRESS`. The daemon also publishes its availability to
 ## Home Assistant entities (MQTT discovery)
 
 On connect, the daemon publishes MQTT discovery configuration for
-one device, named after the panel's device name. All entities share
-an availability topic: the daemon publishes retained `online` to it
-on connect, and if the daemon stops responding the broker publishes
-retained `offline` (the daemon checks in every 60 s, so this is
-detected within about 90 s). Tracked states are re-published every
-5 s, so a lost message heals on its own.
-
-### Entities
-
-The daemon publishes the following entities. The button and relay
-numbering comes from the device profile — see Supported devices
-for the numbering and counts on each model.
+one device, named after the panel's device name. The daemon
+publishes the following entities. The button and relay numbering
+comes from the device profile — see Supported devices for the
+numbering and counts on each model. Entity IDs follow the device
+name: for a panel named "Entryway assistant", Relay 1 appears as
+`switch.entryway_assistant_relay_1`.
 
 - `event` Button N — physical press events (the momentary-only
   buttons).
@@ -175,12 +169,26 @@ for the numbering and counts on each model.
   panel's clear frame ends the episode.
 - `light` Night Light — brightness only, no colour; state is
   optimistic (the MCU sends no status frame for it).
-- `switch` Screen, `number` Screen Brightness, `number` Media Volume
-  plus System / Notification / Alarm / Ring / Voice Call volumes,
-  `select` Rotation (0/90/180/270), `button` Reboot,
-  `switch` Speaker Mute.
+- `switch` Screen.
+- `number` Screen Brightness.
+- `number` Media Volume.
+- `number` System Volume.
+- `number` Notification Volume.
+- `number` Alarm Volume.
+- `number` Ring Volume.
+- `number` Voice Call Volume.
+- `select` Rotation (0/90/180/270).
+- `button` Reboot.
+- `switch` Speaker Mute.
 - `switch` Wake Lock / Wake Screen with Button / Debug — the daemon
   options above.
+
+All entities share an availability topic: the daemon publishes
+retained `online` to it on connect, and if the daemon stops
+responding the broker publishes retained `offline` (the daemon
+checks in every 60 s, so this is detected within about 90 s).
+Tracked states are re-published every 5 s, so a lost message heals
+on its own.
 
 ## Security
 
