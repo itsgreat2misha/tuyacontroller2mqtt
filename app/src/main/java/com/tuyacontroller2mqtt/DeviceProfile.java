@@ -13,7 +13,6 @@ package com.tuyacontroller2mqtt;
 // active() therefore returns it unconditionally. When a second profile
 // lands, selection can key off Build.MODEL.
 public final class DeviceProfile {
-    public final String id;
     public final String model;
     public final String manufacturer;
     public final String serialPath;
@@ -23,11 +22,10 @@ public final class DeviceProfile {
     public final int relayCount;
     public final boolean nightLightSupported;
 
-    public DeviceProfile(String id, String model, String manufacturer,
+    public DeviceProfile(String model, String manufacturer,
                          String serialPath, int baud,
                          int firstButton, int lastButton, int relayCount,
                          boolean nightLightSupported) {
-        this.id = id;
         this.model = model;
         this.manufacturer = manufacturer;
         this.serialPath = serialPath;
@@ -42,8 +40,15 @@ public final class DeviceProfile {
     // 4-8 (the frame id IS the button number); relays are 1-3 (a 4th
     // relay channel appears in query batches but is query-only and is
     // not exposed). The MCU speaks 7-byte frames on the serial device.
+    // Relays are numbered 1..relayCount. Anything outside that range
+    // (on the F5-3, relay 4 appears in query batches only) is not a
+    // command target.
+    public boolean hasRelay(int relay) {
+        return relay >= 1 && relay <= relayCount;
+    }
+
     public static final DeviceProfile F5_3 = new DeviceProfile(
-        "f5_3", "F5-3", "sznaner",
+        "F5-3", "sznaner",
         "/dev/ttyAS2", 115200,
         4, 8, 3,
         true);

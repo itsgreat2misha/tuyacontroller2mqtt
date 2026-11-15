@@ -444,6 +444,7 @@ public class ButtonService extends Service {
         sendQuery();
     }
     private void setNightLight(boolean on, Integer brightness) {
+        if (!profile.nightLightSupported) return;
         SharedPreferences p = getSharedPreferences(Constants.PREFS, MODE_PRIVATE);
         int bright = brightness != null ? brightness : p.getInt("nightlight_brightness", 50);
         if (brightness != null) { SharedPreferences.Editor ed = p.edit(); ed.putInt("nightlight_brightness", bright); ed.apply(); }
@@ -735,7 +736,7 @@ public class ButtonService extends Service {
             if (force) {
                 boolean nlOn = p.getBoolean("nightlight_on", false);
                 int nlB = p.getInt("nightlight_brightness", 50);
-                mqtt.nightLight(nlOn, nlB);
+                if (profile.nightLightSupported) mqtt.nightLight(nlOn, nlB);
                 // QoS 0 state messages can be lost; re-publishing the
                 // tracked states every poll heals a stale HA entity
                 // within one poll tick instead of waiting for a change.
@@ -824,19 +825,19 @@ public class ButtonService extends Service {
         } else if (topic.matches(".*/relay/[0-9]+/mode/set")) {
             String[] parts = topic.split("/");
             int relay = Integer.parseInt(parts[parts.length - 3]);
-            if (relay >= 1 && relay <= 3) {
+            if (profile.hasRelay(relay)) {
                 if ("momentary".equalsIgnoreCase(pl)) setRelayMode(relay, true);
                 else if ("relay".equalsIgnoreCase(pl)) setRelayMode(relay, false);
             }
         } else if (topic.matches(".*/relay/[0-9]+/set")) {
             String[] parts = topic.split("/");
             int relay = Integer.parseInt(parts[parts.length - 2]);
-            if (relay >= 1 && relay <= 4) {
+            if (profile.hasRelay(relay)) {
                 // A momentary relay has no HA switch, so a set can only
                 // arrive from a stale entity or a manual publish: ignore
                 // it -- remote flips are exactly what momentary mode
                 // exists to prevent.
-                if (relay <= 3 && relayMomentary(p, relay)) { Log.i(TAG, "relay set ignored: relay " + relay + " is in momentary mode"); }
+                if (relayMomentary(p, relay)) { Log.i(TAG, "relay set ignored: relay " + relay + " is in momentary mode"); }
                 else setRelay(relay, "ON".equalsIgnoreCase(pl));
             }
         } else if (topic.endsWith("/nightlight/set")) {

@@ -42,7 +42,7 @@ public class MqttTopicsTest {
 
         // A different profile must flow through unchanged: discovery
         // must not contain F5-3 literals for another model.
-        DeviceProfile other = new DeviceProfile("x1", "X1", "acme", "/dev/ttyS1", 9600, 1, 4, 2, false);
+        DeviceProfile other = new DeviceProfile("X1", "acme", "/dev/ttyS1", 9600, 1, 4, 2, false);
         String dev2 = MqttTopics.deviceJson("hall", "Hall", other);
         checkTrue("other model", dev2.contains("\"model\":\"X1\""));
         checkTrue("other manufacturer", dev2.contains("\"manufacturer\":\"acme\""));
@@ -65,6 +65,15 @@ public class MqttTopicsTest {
         check("profile relays", f53.relayCount, 3);
         checkTrue("profile night light", f53.nightLightSupported);
         checkTrue("active profile is F5-3", DeviceProfile.active() == f53);
+
+        // Relay range is the profile's relayCount: relay 4 exists on
+        // the F5-3 only as a query-batch marker and must not be
+        // accepted as a command target.
+        checkTrue("profile has relay 1", f53.hasRelay(1));
+        checkTrue("profile has relay 3", f53.hasRelay(3));
+        checkTrue("profile has no relay 4", !f53.hasRelay(4));
+        checkTrue("profile has no relay 0", !f53.hasRelay(0));
+        checkTrue("other profile has no relay 3", !other.hasRelay(3));
 
         System.out.println("OK: " + passed + " checks passed");
     }
