@@ -8,9 +8,9 @@ import android.util.Log;
 import java.io.*;
 // Tuya Android controller daemon. The panel MCU talks to the Android
 // SoC over an internal serial bus; the active DeviceProfile carries the
-// model specifics (serial device, baud, button/relay counts). Frame
-// formats below are the F5-3 profile's protocol; see PROTOCOL.md for
-// the full table.
+// model specifics (serial device, baud, button/relay counts, frame
+// codes, /proc paths). Frame formats below are the F5-3 profile's
+// protocol; see PROTOCOL.md for the full table.
 //   Motion: fc 00 1c 00 00 00 fe = motion, fc 00 0c 00 00 00 fe = clear
 //     (the sensor is exposed as Motion, device_class motion: static
 //     presence is not proven, see PROTOCOL.md)
@@ -213,17 +213,7 @@ public class ButtonService extends Service {
         for (int i = 0; i < len; i++) { if (i > 0) sb.append(" "); sb.append(String.format("%02x", f[i])); }
         return sb.toString();
     }
-    private static String decodeFrame(byte[] f) {
-        if (f[2] == 0x1c) return "motion ON";
-        if (f[2] == 0x0c) return "motion OFF";
-        if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) return "button press id=" + (f[5] & 0xff);
-        // Query frame fc 00 00 aa ff 00 fe must be checked BEFORE the
-        // relay branch (aa & f0 == a0 would otherwise label it
-        // "relay 0 OFF").
-        if (f[2] == 0x00 && f[3] == (byte) 0xaa) return "query";
-        if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) return "relay " + (f[5] & 0xff) + " " + (f[4] == 0x01 ? "ON" : "OFF") + " (f3=" + String.format("%02x", f[3]) + ")";
-        return "unknown f2=" + String.format("%02x", f[2]) + " f3=" + String.format("%02x", f[3]);
-    }
+    private String decodeFrame(byte[] f) { return FrameCodec.describe(profile, f); }
     private String readFirstLine(String path) {
         try {
             BufferedReader r = new BufferedReader(new FileReader(path));
@@ -426,16 +416,13 @@ public class ButtonService extends Service {
     }
     private void sendQuery() {
         lastQueryTime = System.currentTimeMillis();
-        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, (byte) 0xaa, (byte) 0xff, 0x00, (byte) 0xfe});
+        writeSerial(FrameCodec.queryFrame(profile));
     }
     private void setRelay(int relay, boolean on) {
         lastSetTime = System.currentTimeMillis(); lastSetRelay = relay; lastSetState = on;
-        byte code = (byte) (0xa0 + relay);
-        // Real switch frame for the exposed relays: last byte = relay id.
-        // Relay 4 has no physical button and its inbound last byte is 0,
-        // so keep the test frame for it (it is not exposed as a switch).
-        byte last = (relay >= 1 && relay <= profile.relayCount) ? (byte) relay : (byte) 0x00;
-        writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x00, code, (byte) (on ? 0x01 : 0x00), last, (byte) 0xfe});
+        // Frame shape (including the test frame FrameCodec builds
+        // for a relay outside the profile) is profile-driven.
+        writeSerial(FrameCodec.relayFrame(profile, relay, on));
         // Optimistic state publish; the following query batch will
         // confirm the same state (suppressed as a press, see handleFrameArrival).
         if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
@@ -449,10 +436,10 @@ public class ButtonService extends Service {
         int bright = brightness != null ? brightness : p.getInt("nightlight_brightness", 50);
         if (brightness != null) { SharedPreferences.Editor ed = p.edit(); ed.putInt("nightlight_brightness", bright); ed.apply(); }
         if (on) {
-            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x01, 0x00, 0x00, (byte) 0xfe});
-            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x02, (byte) bright, 0x00, (byte) 0xfe});
+            writeSerial(FrameCodec.nightLightFrame(profile, true));
+            writeSerial(FrameCodec.nightLightBrightnessFrame(profile, bright));
         } else {
-            writeSerial(new byte[]{(byte) 0xfc, 0x00, 0x1d, 0x00, 0x00, 0x00, (byte) 0xfe});
+            writeSerial(FrameCodec.nightLightFrame(profile, false));
         }
         SharedPreferences.Editor ed = p.edit(); ed.putBoolean("nightlight_on", on); ed.putInt("nightlight_brightness", bright); ed.apply();
         try { mqtt.nightLight(on, bright); } catch (Exception e) { Log.w(TAG, "nightlight publish failed: " + e); }
@@ -470,11 +457,11 @@ public class ButtonService extends Service {
     //    and logs every reopen to events.log, so a dead reader is
     //    visible in the diagnostics instead of silent.
     // 2. ONE-FRAME LOSS ON CORRUPTION: the old parser stored an
-    //    unexpected 0xfc mid-frame as data, so the corrupted frame
+    //    unexpected start byte mid-frame as data, so the corrupted frame
     //    AND the good frame after it were both lost before resync.
-    //    Now a 0xfc at pos > 0 discards the partial frame and starts
-    //    a new one immediately. No known frame has 0xfc as a data
-    //    byte (data is 00/01/a0-a4/aa/1c/0c/1d/brightness), so this
+    //    Now a start byte at pos > 0 discards the partial frame and
+    //    starts a new one immediately. No known frame has the start
+    //    byte as a data byte (data is 00/01/a0-a4/aa/1c/0c/1d/brightness), so this
     //    cannot split a valid frame. A byte lost inside a frame
     //    still costs that one frame (unavoidable: its end byte no
     //    longer lines up), but the next frame resyncs, as before.
@@ -519,31 +506,31 @@ public class ButtonService extends Service {
                     Log.i(TAG, "tty reader scan: own serial fds=" + ttyFds + " (other pids hidden from app, check via adb if a miss is suspected)");
                     diag.event("tty reader scan: own serial fds=" + ttyFds + " (other pids hidden from app)");
                 }
-                byte[] frame = new byte[7]; int pos = 0;
+                byte[] frame = new byte[profile.frameLength]; int pos = 0;
                 byte[] buf = new byte[64];
                 while (running) {
                     int n = serialIn.read(buf); if (n < 0) throw new java.io.EOFException("serial EOF");
                     for (int i = 0; i < n; i++) {
                         int b = buf[i] & 0xff;
-                        if (pos > 0 && b == 0xfc) {
+                        if (pos > 0 && b == (profile.frameStart & 0xff)) {
                             droppedFrameCount++;
                             String partial = hex(frame, pos);
                             Log.i(TAG, "serial frame partial discarded on resync: " + partial);
-                            diag.serial("dropped partial frame: " + partial + " (resync on 0xfc)");
+                            diag.serial("dropped partial frame: " + partial + " (resync on start byte)");
                             frame[0] = (byte) b; pos = 1; continue;
                         }
-                        if (pos == 0 && b != 0xfc) continue;
+                        if (pos == 0 && b != (profile.frameStart & 0xff)) continue;
                         frame[pos++] = (byte) b;
-                        if (pos == 7) {
+                        if (pos == profile.frameLength) {
                             pos = 0;
-                            if (frame[6] == (byte) 0xfe) {
-                                byte[] copy = java.util.Arrays.copyOf(frame, 7);
+                            if (frame[profile.frameLength - 1] == profile.frameEnd) {
+                                byte[] copy = java.util.Arrays.copyOf(frame, profile.frameLength);
                                 frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, 7);
                                 backoffMs = 1000;
                                 handleFrameArrival(copy);
                             } else {
                                 droppedFrameCount++;
-                                String bad = hex(frame, 7);
+                                String bad = hex(frame, profile.frameLength);
                                 Log.i(TAG, "serial frame bad end (dropped, no fe): " + bad);
                                 diag.serial("dropped bad frame: " + bad);
                             }
@@ -564,12 +551,12 @@ public class ButtonService extends Service {
         }
     }
     private void handleFrameArrival(byte[] f) {
-        String frameHex = hex(f, 7);
+        String frameHex = hex(f, f.length);
         Log.i(TAG, "frame: " + frameHex);
         diag.serial("IN " + frameHex + " " + decodeFrame(f));
         try {
-            if (f[2] == 0x1c) { lastMotionState = 1; lastMotionFrameTimeMs = System.currentTimeMillis(); enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true)); }
-            else if (f[2] == 0x0c) {
+            if (FrameCodec.isMotionOn(profile, f)) { lastMotionState = 1; lastMotionFrameTimeMs = System.currentTimeMillis(); enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true)); }
+            else if (FrameCodec.isMotionOff(profile, f)) {
                 // OFF-without-ON warning : an OFF
                 // while already clear means either a repeat clear or
                 // a missed ON. The first OFF after service start
@@ -582,7 +569,7 @@ public class ButtonService extends Service {
                 }
                 lastMotionState = 0; lastMotionFrameTimeMs = System.currentTimeMillis(); enqueuePublish(new PublishAction(PublishAction.MOTION, 0, false));
             }
-            else if (f[2] == 0x00 && f[3] == 0x00 && f[4] == 0x01) {
+            else if (FrameCodec.isButtonPress(f)) {
                 if (wakescreenEnabled(getSharedPreferences(Constants.PREFS, MODE_PRIVATE))) wakeScreen();
                 enqueuePublish(new PublishAction(PublishAction.BUTTON, f[5] & 0xff, false));
                 // Physical press = presence :
@@ -590,7 +577,7 @@ public class ButtonService extends Service {
                 // episode. Covers a press landing before the radar edge.
                 lastMotionState = 1;
                 enqueuePublish(new PublishAction(PublishAction.MOTION, 0, true));
-            } else if (f[2] == 0x00 && (f[3] & 0xf0) == 0xa0) {
+            } else if (FrameCodec.isRelayFrame(profile, f)) {
                 if (wakescreenEnabled(getSharedPreferences(Constants.PREFS, MODE_PRIVATE))) wakeScreen();
                 // Relay 4 is a query-only channel: its frame is
                 // fc 00 00 a4 00 00 fe, i.e. f[5] is 0, NOT 4 (detect
@@ -600,12 +587,12 @@ public class ButtonService extends Service {
                 // below -- discard them, they were state, not presses.
                 // A press arriving after the a4 is a new candidate in
                 // a fresh window and is never poisoned by this batch.
-                if ((f[3] & 0xff) == 0xa4) {
+                if (FrameCodec.isQueryEndMarker(profile, f)) {
                     synchronized (pendingPresses) { pendingPresses.clear(); }
                     return;
                 }
-                int relay = f[5] & 0xff;
-                boolean on = f[4] == 0x01;
+                int relay = FrameCodec.relayNumber(f);
+                boolean on = FrameCodec.relayOn(f);
                 if (relay >= 1 && relay <= 4) lastRelayState[relay] = on ? 1 : 0;
                 enqueuePublish(new PublishAction(PublishAction.RELAY, relay, on));
                 // Candidate-press window (80 ms): a relay frame is
@@ -693,6 +680,7 @@ public class ButtonService extends Service {
         } catch (Exception e) { return -1; }
     }
     private void setVolumePct(int stream, int pct) {
+        pct = InputValidation.clampPercent(pct);
         AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
         int max = am.getStreamMaxVolume(stream);
         am.setStreamVolume(stream, pct * max / 100, 0);
@@ -731,7 +719,7 @@ public class ButtonService extends Service {
             if (force || scr != lastScreen) { lastScreen = scr; mqtt.screen(scr); }
             int r = rotationDeg();
             if (r >= 0 && (force || r != lastRotation)) { lastRotation = r; mqtt.rotation(r); }
-            String pmv = readProc("/proc/vendor/mute_manual");
+            String pmv = readProc(profile.muteProcPath);
             if (force || !pmv.equals(lastProcMute)) { lastProcMute = pmv; mqtt.procState("mute", pmv); }
             if (force) {
                 boolean nlOn = p.getBoolean("nightlight_on", false);
@@ -888,7 +876,10 @@ public class ButtonService extends Service {
             Log.i(TAG, "reboot button pressed via HA, running su reboot");
             runSu("reboot");
         } else if (topic.endsWith("/proc/mute/set")) {
-            if (writeProc("/proc/vendor/mute_manual", pl)) mqtt.procState("mute", pl); else publishDeviceStates(true);
+            // Only the node's own values reach the node: a payload
+            // other than on/off is ignored, not written verbatim.
+            if (!InputValidation.isValidMutePayload(pl)) { Log.i(TAG, "proc mute set ignored, payload is not on/off: " + pl); }
+            else if (writeProc(profile.muteProcPath, pl)) mqtt.procState("mute", pl); else publishDeviceStates(true);
         }
     }
     @Override public void onDestroy() {

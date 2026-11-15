@@ -33,9 +33,10 @@ migration story in the PR:
 2. Add a `DeviceProfile` entry in
    `app/src/main/java/com/tuyacontroller2mqtt/DeviceProfile.java`
    (serial device, baud, model/manufacturer strings as the vendor
-   reports them, button range, relay count, night-light support).
-   If your model's frame codes differ, put them behind the profile
-   rather than branching at call sites.
+   reports them, button range, relay count, capability flags,
+   frame codes, /proc node paths). Frame building/parsing and
+   discovery publication read the profile, so a new model needs
+   no call-site branches.
 3. Add a row to the README's Supported devices table with status
    **Tested** only if you ran it on the real hardware; otherwise
    mark it untested.

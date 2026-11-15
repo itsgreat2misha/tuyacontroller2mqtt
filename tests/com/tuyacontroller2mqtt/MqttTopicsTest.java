@@ -42,7 +42,7 @@ public class MqttTopicsTest {
 
         // A different profile must flow through unchanged: discovery
         // must not contain F5-3 literals for another model.
-        DeviceProfile other = new DeviceProfile("X1", "acme", "/dev/ttyS1", 9600, 1, 4, 2, false);
+        DeviceProfile other = new DeviceProfile("X1", "acme", "/dev/ttyS1", 9600, 1, 4, 2, false, false, false, (byte) 0xfc, (byte) 0xfe, 7, 0x1c, 0x0c, 0x1d, 0xaa, 0xa4, 0xa0, "/proc/vendor/mute_manual");
         String dev2 = MqttTopics.deviceJson("hall", "Hall", other);
         checkTrue("other model", dev2.contains("\"model\":\"X1\""));
         checkTrue("other manufacturer", dev2.contains("\"manufacturer\":\"acme\""));
@@ -64,6 +64,18 @@ public class MqttTopicsTest {
         check("profile last button", f53.lastButton, 8);
         check("profile relays", f53.relayCount, 3);
         checkTrue("profile night light", f53.nightLightSupported);
+        checkTrue("profile motion", f53.motionSupported);
+        checkTrue("profile speaker mute", f53.speakerMuteSupported);
+        check("profile frame start", f53.frameStart & 0xff, 0xfc);
+        check("profile frame end", f53.frameEnd & 0xff, 0xfe);
+        check("profile frame length", f53.frameLength, 7);
+        check("profile motion on code", f53.motionOnCode, 0x1c);
+        check("profile motion off code", f53.motionOffCode, 0x0c);
+        check("profile night light code", f53.nightLightCode, 0x1d);
+        check("profile query code", f53.queryCode, 0xaa);
+        check("profile query end marker", f53.queryEndMarkerCode, 0xa4);
+        check("profile relay code base", f53.relayCodeBase, 0xa0);
+        check("profile mute proc path", f53.muteProcPath, "/proc/vendor/mute_manual");
         checkTrue("active profile is F5-3", DeviceProfile.active() == f53);
 
         // Relay range is the profile's relayCount: relay 4 exists on

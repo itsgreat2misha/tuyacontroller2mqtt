@@ -32,6 +32,17 @@ adopted in 1.2.0.
   sized from the profile.
 - The *Use TLS* checkbox in the app now says "default port 8883";
   the port field has always accepted any port.
+- The device profile now carries the MCU frame codes, the frame
+  shape, and the /proc node paths, and the motion and Speaker
+  Mute entities are only published on profiles that support them
+  (no change on the F5-3, which supports both). Frame handling
+  and discovery building moved into tested pure classes; the
+  frames sent and the discovery published on the F5-3 are
+  unchanged.
+- Per-stream volume commands now clamp the percentage to 0-100
+  before scaling, and the Speaker Mute command only accepts its
+  on/off payloads instead of writing any payload to the /proc
+  node verbatim.
 
 ### Removed
 
