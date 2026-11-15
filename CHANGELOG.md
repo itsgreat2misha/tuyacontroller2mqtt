@@ -43,6 +43,9 @@ adopted in 1.2.0.
   before scaling, and the Speaker Mute command only accepts its
   on/off payloads instead of writing any payload to the /proc
   node verbatim.
+- SECURITY.md no longer promises a response timeframe for
+  vulnerability reports; reports are reviewed on a best-effort
+  basis.
 
 ### Removed
 
