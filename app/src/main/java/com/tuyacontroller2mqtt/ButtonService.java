@@ -525,7 +525,7 @@ public class ButtonService extends Service {
                             pos = 0;
                             if (frame[profile.frameLength - 1] == profile.frameEnd) {
                                 byte[] copy = java.util.Arrays.copyOf(frame, profile.frameLength);
-                                frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, 7);
+                                frameCount++; lastFrameTimeMs = System.currentTimeMillis(); lastFrameHex = hex(copy, profile.frameLength);
                                 backoffMs = 1000;
                                 handleFrameArrival(copy);
                             } else {
